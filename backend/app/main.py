@@ -12,7 +12,7 @@ from .routers import (
     attachments, admin, market_data,
 )
 
-app = FastAPI(title="TradeZella-style Local", version="0.2.0")
+app = FastAPI(title="Forge — self-hosted trading journal", version="0.2.0")
 
 cors_origins = os.environ.get("CORS_ORIGINS", "*")
 app.add_middleware(

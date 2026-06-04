@@ -3,7 +3,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 
 DATABASE_URL = os.environ.get(
-    "DATABASE_URL", "postgresql+psycopg://tz:tz_local_dev@localhost:5433/tradezella"
+    "DATABASE_URL", "postgresql+psycopg://tz:tz_local_dev@localhost:5433/forge"
 )
 
 engine = create_engine(DATABASE_URL, pool_pre_ping=True, future=True)

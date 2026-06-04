@@ -1,8 +1,8 @@
-# Tradezella (self-hosted)
+# Forge (self-hosted)
 
 A self-hosted, single-user trading journal for futures traders running multiple prop-firm accounts. Imports raw fills from Sierra Chart's Trade Activity Log (TSV) and NinjaTrader's Executions grid (CSV), matches them into round-trip trades, and computes per-account economics, drawdown lifecycle, payout planning, and analytics.
 
-The sidebar still brands the UI as **Forge.local** — same product.
+The UI shows up as **Forge.local** in the sidebar.
 
 ## What it does
 
@@ -20,7 +20,7 @@ Prerequisites: Docker Desktop running.
 
 ```bash
 git clone <this-repo>
-cd tradezella
+cd forge
 cp .env.example .env          # set passwords + ports
 docker compose up -d --build
 ```

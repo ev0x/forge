@@ -4,9 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Self-hosted, single-user "TradeZella-style" trading journal for futures traders running multiple prop-firm accounts. Imports raw fills from Sierra Chart's Trade Activity Log (TSV) and NinjaTrader (CSV), matches them into round-trip trades, and computes per-account economics, drawdown lifecycle, payout planning, and analytics.
-
-The frontend sidebar still brands it as "Forge.local" — that's the same product.
+Self-hosted, single-user trading journal ("Forge") for futures traders running multiple prop-firm accounts. Imports raw fills from Sierra Chart's Trade Activity Log (TSV) and NinjaTrader (CSV), matches them into round-trip trades, and computes per-account economics, drawdown lifecycle, payout planning, and analytics.
 
 ## Running it
 
@@ -17,7 +15,7 @@ docker compose up -d --build          # build + start db, api, web
 docker compose logs -f api            # tail backend logs
 docker compose restart api            # pick up Python edits (no --reload in CMD)
 docker compose up -d --build web      # rebuild frontend bundle (Vite build at image-build time)
-docker compose exec db psql -U tz -d tradezella   # DB shell
+docker compose exec db psql -U tz -d forge        # DB shell (DB name = POSTGRES_DB in .env)
 ```
 
 **Ports** (configured in `.env`): web `5180`, api `8088`, postgres `5433`. API docs at http://localhost:8088/docs.
