@@ -1,0 +1,47 @@
+# Secrets & local config
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+
+# Real user data (database, uploaded trade fills, anything Sierra wrote)
+data/
+sierra-data/
+
+# Claude Code & editor metadata
+.claude/
+.vscode/
+.idea/
+
+# Conversation/session exports the host may drop into the repo
+20[0-9][0-9]-*.txt
+*-can-you-*.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Node / Vite
+node_modules/
+dist/
+.vite/
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Tool outputs
+*.swp
+*.bak
+.coverage
