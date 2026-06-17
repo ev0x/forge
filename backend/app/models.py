@@ -122,6 +122,14 @@ class PropFirmDef(Base):
     is_custom = Column(Boolean, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
 
+    # Promo / discount code currently usable for this firm. Informational —
+    # apply manually when purchasing an account.
+    discount_code = Column(String, nullable=True)
+    discount_pct = Column(Float, default=0.0)         # 0..1
+    discount_expires = Column(DateTime, nullable=True)
+    # Fraction of profit the trader keeps post-funded. e.g. Tradeify 0.9 = 90%.
+    trader_profit_split_pct = Column(Float, default=0.9)
+
     plans = relationship("PropFirmPlanDef", back_populates="firm", cascade="all, delete-orphan")
 
 
@@ -183,6 +191,10 @@ class UserSettings(Base):
     timezone = Column(String, default="UTC")
     # Whether trade_date should follow entry_time or exit_time (TradeZella uses exit).
     date_by = Column(String, default="exit")    # 'exit' | 'entry'
+    # Secondary currency for UI conversion display (USD numbers shown alongside
+    # local-currency equivalent). FX rate is `USD * rate = secondary`.
+    secondary_currency = Column(String, default="AUD")
+    secondary_currency_fx_rate = Column(Float, default=1.5)
 
 
 class MarketDataBar(Base):
@@ -278,6 +290,10 @@ class Execution(Base):
     low_during_position = Column(Float, nullable=True)
     note = Column(Text, nullable=True)
     is_automated = Column(Boolean, default=False)
+    # Per-fill commission paid (USD). Tradovate fill exports carry this directly;
+    # NinjaTrader exports include it in the Commission column. NULL means the
+    # parser didn't have it — matching falls back to account-level rates.
+    commission = Column(Float, nullable=True)
 
     __table_args__ = (
         UniqueConstraint("account_id", "fill_id", name="uq_account_fill"),

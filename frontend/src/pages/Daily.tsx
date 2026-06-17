@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import { useSearchParams, Link } from 'react-router-dom'
 import { api, Trade, DailyPnl, Strategy, fmtUsd, fmtDuration, fmtPct } from '../lib/api'
 import TradeDetailModal from '../components/TradeDetailModal'
+import { useDateFmt } from '../lib/timezone'
 
 export default function Daily({ accountIds }: { accountIds?: number[] }) {
   const [params, setParams] = useSearchParams()
@@ -11,6 +12,7 @@ export default function Daily({ accountIds }: { accountIds?: number[] }) {
   const [strategies, setStrategies] = useState<Strategy[]>([])
   const [loading, setLoading] = useState(true)
   const [selectedTrade, setSelectedTrade] = useState<Trade | null>(null)
+  const fmt = useDateFmt()
 
   useEffect(() => {
     setLoading(true)
@@ -123,6 +125,42 @@ export default function Daily({ accountIds }: { accountIds?: number[] }) {
                 value={String(selectedTrades.reduce((a, t) => a + t.quantity, 0))} />
             </div>
 
+            {/* Long / Short combined P&L for the day */}
+            {(() => {
+              const longs = selectedTrades.filter(t => t.side === 'Long')
+              const shorts = selectedTrades.filter(t => t.side === 'Short')
+              const longPnl = longs.reduce((a, t) => a + t.net_pnl, 0)
+              const shortPnl = shorts.reduce((a, t) => a + t.net_pnl, 0)
+              const longWins = longs.filter(t => t.net_pnl > 0).length
+              const shortWins = shorts.filter(t => t.net_pnl > 0).length
+              return (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div className="bg-panel border border-border rounded-lg p-4">
+                    <div className="flex items-baseline justify-between">
+                      <div>
+                        <div className="text-[10px] text-muted uppercase tracking-wider">Longs</div>
+                        <div className="text-[11px] text-muted">{longs.length} trade{longs.length !== 1 ? 's' : ''} · {longWins}W / {longs.length - longWins}L</div>
+                      </div>
+                      <div className={`text-2xl font-bold num ${longPnl > 0 ? 'text-win' : longPnl < 0 ? 'text-loss' : 'text-muted'}`}>
+                        {fmtUsd(longPnl, { signed: true })}
+                      </div>
+                    </div>
+                  </div>
+                  <div className="bg-panel border border-border rounded-lg p-4">
+                    <div className="flex items-baseline justify-between">
+                      <div>
+                        <div className="text-[10px] text-muted uppercase tracking-wider">Shorts</div>
+                        <div className="text-[11px] text-muted">{shorts.length} trade{shorts.length !== 1 ? 's' : ''} · {shortWins}W / {shorts.length - shortWins}L</div>
+                      </div>
+                      <div className={`text-2xl font-bold num ${shortPnl > 0 ? 'text-win' : shortPnl < 0 ? 'text-loss' : 'text-muted'}`}>
+                        {fmtUsd(shortPnl, { signed: true })}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )
+            })()}
+
             <div className="bg-panel border border-border rounded-lg overflow-hidden">
               <div className="px-4 py-2.5 border-b border-border text-sm font-semibold">
                 Trades on this day
@@ -146,7 +184,7 @@ export default function Daily({ accountIds }: { accountIds?: number[] }) {
                     <tr key={t.id}
                       onClick={() => setSelectedTrade(t)}
                       className="border-t border-border hover:bg-panel2/60 cursor-pointer">
-                      <td className="px-3 py-2 num text-muted">{new Date(t.entry_time).toLocaleTimeString()}</td>
+                      <td className="px-3 py-2 num text-muted">{fmt(t.entry_time, { timeOnly: true })}</td>
                       <td className="px-3 py-2 font-medium">{t.symbol}</td>
                       <td className="px-3 py-2">
                         <span className={`text-[10px] px-1.5 py-0.5 rounded ${t.side === 'Long' ? 'bg-win/15 text-win' : 'bg-loss/15 text-loss'}`}>

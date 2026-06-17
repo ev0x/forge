@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { Routes, Route, NavLink, useLocation } from 'react-router-dom'
 import { api, Account } from './lib/api'
 import MultiAccountSelect, { AccountFilters } from './components/MultiAccountSelect'
+import TimezonePicker from './components/TimezonePicker'
+import { TimezoneProvider } from './lib/timezone'
 
 const FILTERS_KEY = 'tz_account_filters'
 const SELECTION_KEY = 'tz_account_selection'
@@ -39,10 +41,24 @@ export default function App() {
   })
   const loc = useLocation()
 
+  const [displayTz, setDisplayTz] = useState<string>(() => {
+    return localStorage.getItem('tz_display') || 'UTC'
+  })
+
   async function refreshAccounts() {
     try { setAccounts(await api.accounts.list()) } catch (e) { console.error(e) }
   }
   useEffect(() => { refreshAccounts() }, [])
+  // Read the user's stored timezone preference and use it for display formatting.
+  useEffect(() => {
+    api.settings.get().then(s => {
+      if (s?.timezone) {
+        setDisplayTz(s.timezone)
+        localStorage.setItem('tz_display', s.timezone)
+      }
+    }).catch(() => {})
+  }, [])
+  useEffect(() => { localStorage.setItem('tz_display', displayTz) }, [displayTz])
   useEffect(() => { setMobileMenuOpen(false) }, [loc.pathname])
   useEffect(() => {
     try { localStorage.setItem(FILTERS_KEY, JSON.stringify(filters)) } catch {}
@@ -105,6 +121,7 @@ export default function App() {
   }
 
   return (
+    <TimezoneProvider tz={displayTz}>
     <div className="flex h-screen overflow-hidden bg-bg text-text">
       {/* Mobile drawer backdrop */}
       {mobileMenuOpen && (
@@ -159,6 +176,7 @@ export default function App() {
           </button>
           <div className="text-sm text-muted truncate">{titleFor(loc.pathname)}</div>
           <div className="ml-auto flex items-center gap-2">
+            <TimezonePicker onChanged={setDisplayTz} />
             <span className="text-xs text-muted hidden sm:inline">Accounts</span>
             <MultiAccountSelect
               accounts={accounts}
@@ -173,7 +191,7 @@ export default function App() {
           <Routes>
             <Route path="/" element={<Dashboard accountIds={effectiveIds} accounts={accounts} />} />
             <Route path="/daily" element={<Daily accountIds={effectiveIds} />} />
-            <Route path="/trades" element={<Trades accountIds={effectiveIds} />} />
+            <Route path="/trades" element={<Trades accountIds={effectiveIds} accounts={accounts} />} />
             <Route path="/calendar" element={<Calendar accountIds={effectiveIds} />} />
             <Route path="/strategies" element={<Strategies />} />
             <Route path="/plan" element={<Plan />} />
@@ -187,6 +205,7 @@ export default function App() {
         </div>
       </main>
     </div>
+    </TimezoneProvider>
   )
 }
 

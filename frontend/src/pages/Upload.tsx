@@ -9,7 +9,7 @@ export default function Upload({ onUploaded }: { onUploaded: () => void }) {
   const [err, setErr] = useState<string | null>(null)
   const [dragOver, setDragOver] = useState(false)
   const [recent, setRecent] = useState<any[]>([])
-  const [helpFor, setHelpFor] = useState<ExportFormat>('sierra')
+  const [helpFor, setHelpFor] = useState<ExportFormat>('ninjatrader')
 
   async function loadRecent() {
     try { setRecent(await api.uploads()) } catch {}
@@ -48,7 +48,7 @@ export default function Upload({ onUploaded }: { onUploaded: () => void }) {
       >
         <div className="text-lg font-medium mb-1">Drop your trade export here</div>
         <div className="text-sm text-muted mb-4">
-          Sierra Chart Trade Activity Log <span className="opacity-50">or</span> NinjaTrader Executions CSV — format auto-detected
+          NinjaTrader Executions CSV, Tradovate fills CSV, or Sierra Chart Trade Activity Log — format auto-detected
         </div>
         <label className="inline-block">
           <span className="bg-accent text-bg font-medium px-4 py-2 rounded text-sm cursor-pointer hover:opacity-90">

@@ -1,71 +1,141 @@
-from datetime import datetime, timedelta
+"""Market-data endpoints. Currently sources OHLC bars from NinjaTrader tick
+text exports (.txt files from NT "Historical Data Manager → Export"). Tick
+files get streamed once and aggregated into bars at every supported timeframe.
+
+Bar lookup for a trade chart uses **root-prefix matching**: a trade on
+`FGBLU6.CME` will match any bar with symbol starting with `FGBL` so the chart
+finds data across all contract months without exact-symbol gymnastics.
+"""
+from datetime import datetime
 from typing import Optional
 from fastapi import APIRouter, Depends, File, UploadFile, HTTPException, Form, Query
 from sqlalchemy.orm import Session
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
+import os
+import re
+import tempfile
 
 from .. import models, schemas
 from ..db import get_db
-from ..bars import parse_bars
-from ..scid_reader import read_scid_bytes, parse_header, read_scid_path, scid_file_stats
-from ..instruments import extract_root, get_spec
-from sqlalchemy.dialects.postgresql import insert as pg_insert
-import os
-import tempfile
+from ..nt_tick_parser import parse_nt_tick_to_bars, parse_symbol_from_filename, TIMEFRAME_SECONDS
+from ..instruments import extract_root
 
 router = APIRouter(prefix="/api/market-data", tags=["market-data"])
 
 
-@router.post("/upload", response_model=schemas.MarketDataUploadResult)
-async def upload_bars(
+@router.get("/timeframes")
+def list_timeframes():
+    """Frontend uses this to keep its picker in sync with backend support."""
+    return [{"label": k, "seconds": v} for k, v in TIMEFRAME_SECONDS.items()]
+
+
+@router.post("/upload-nt-tick", response_model=schemas.MarketDataUploadResult)
+async def upload_nt_tick(
     file: UploadFile = File(...),
-    symbol: str = Form(...),
-    timeframe: str = Form("1m"),
-    price_divisor: Optional[float] = Form(None),
+    symbol_override: Optional[str] = Form(None),
     db: Session = Depends(get_db),
 ):
-    content = await file.read()
-    if not content:
-        raise HTTPException(400, "Empty file")
-    bars, meta = parse_bars(content, symbol, price_divisor=price_divisor, timeframe=timeframe)
-    if not bars:
-        raise HTTPException(400, f"No bars parsed. meta={meta}")
+    """Upload a NinjaTrader tick .txt file. The symbol is parsed from the
+    filename (e.g. `FGBL 03-26.Last.txt` -> contract `FGBLH6`) unless overridden.
 
-    # Idempotent insert: skip dupes by (symbol, timeframe, ts)
-    existing_pairs = set(db.execute(
-        select(models.MarketDataBar.ts).where(
-            models.MarketDataBar.symbol == symbol,
-            models.MarketDataBar.timeframe == timeframe,
+    All supported timeframes are aggregated on the same pass.
+    """
+    filename = file.filename or "unknown.txt"
+    # Stream to a temp file so we can re-read it (the parser is iterator-based).
+    tmp = tempfile.NamedTemporaryFile(prefix="nt_tick_", suffix=".txt", delete=False)
+    tmp_path = tmp.name
+    bytes_received = 0
+    try:
+        while True:
+            chunk = await file.read(1024 * 1024)
+            if not chunk:
+                break
+            tmp.write(chunk)
+            bytes_received += len(chunk)
+        tmp.close()
+        if bytes_received == 0:
+            raise HTTPException(400, "Empty file")
+        if symbol_override:
+            root = extract_root(symbol_override) or symbol_override
+            contract = symbol_override.split(".")[0]
+            # Still aggregate using the parser's path-only logic, but override
+            # what we *store* the bars under.
+            _, _, bars_by_tf = parse_nt_tick_to_bars(_with_name(tmp_path, filename))
+        else:
+            root, contract, bars_by_tf = parse_nt_tick_to_bars(_with_name(tmp_path, filename))
+
+        total_inserted = 0
+        total_skipped = 0
+        earliest: Optional[datetime] = None
+        latest: Optional[datetime] = None
+        timeframes_written: list[str] = []
+
+        # Postgres caps prepared-statement params at 65535. Each row uses 9
+        # columns → max 7281 rows per INSERT. Chunk well under that.
+        CHUNK = 5000
+        for tf, rows in bars_by_tf.items():
+            if not rows:
+                continue
+            tf_inserted = 0
+            for i in range(0, len(rows), CHUNK):
+                chunk = rows[i:i+CHUNK]
+                batch = [{
+                    "symbol": contract, "timeframe": tf, "ts": ts,
+                    "o": o, "h": h, "l": l, "c": c, "v": v,
+                    "source": "nt_tick",
+                } for (ts, o, h, l, c, v) in chunk]
+                stmt = (pg_insert(models.MarketDataBar)
+                        .values(batch)
+                        .on_conflict_do_nothing(index_elements=["symbol", "timeframe", "ts"])
+                        .returning(models.MarketDataBar.id))
+                result = db.execute(stmt)
+                tf_inserted += len(result.fetchall())
+            total_inserted += tf_inserted
+            total_skipped += len(rows) - tf_inserted
+            tf_min = rows[0][0]
+            tf_max = rows[-1][0]
+            if earliest is None or tf_min < earliest:
+                earliest = tf_min
+            if latest is None or tf_max > latest:
+                latest = tf_max
+            timeframes_written.append(f"{tf}:{len(rows)}")
+        db.commit()
+
+        notes = [
+            f"Source file: {filename} ({bytes_received/1024/1024:.1f} MB)",
+            f"Symbol parsed: root={root}, contract={contract}",
+            f"Aggregated to {len(bars_by_tf)} timeframes ({', '.join(timeframes_written)})",
+        ]
+        if symbol_override:
+            notes.append(f"Symbol override applied: {symbol_override}")
+
+        return schemas.MarketDataUploadResult(
+            symbol=contract, timeframe="multi",
+            parsed=sum(len(rows) for rows in bars_by_tf.values()),
+            inserted=total_inserted, skipped_duplicates=total_skipped,
+            price_divisor=1.0, earliest=earliest, latest=latest, notes=notes,
         )
-    ).scalars().all())
+    finally:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
 
-    inserted = 0; skipped = 0
-    for b in bars:
-        if b.ts in existing_pairs:
-            skipped += 1; continue
-        db.add(models.MarketDataBar(
-            symbol=symbol, timeframe=timeframe, ts=b.ts,
-            o=b.o, h=b.h, l=b.l, c=b.c, v=b.v,
-            source="sierra_upload",
-        ))
-        existing_pairs.add(b.ts)
-        inserted += 1
-    db.commit()
 
-    notes = []
-    notes.append(f"Delimiter: {meta.get('delim')}")
-    notes.append(f"Header detected: {meta.get('header_detected')}")
-    notes.append(f"Price divisor used: {meta.get('price_divisor')}")
-    if meta.get('header_detected'):
-        notes.append(f"Columns: {meta.get('columns')}")
-
-    return schemas.MarketDataUploadResult(
-        symbol=symbol, timeframe=timeframe,
-        parsed=len(bars), inserted=inserted, skipped_duplicates=skipped,
-        price_divisor=meta.get('price_divisor', 1.0),
-        earliest=min(b.ts for b in bars), latest=max(b.ts for b in bars),
-        notes=notes,
-    )
+def _with_name(path: str, original_name: str) -> str:
+    """Symlink/alias trick: the parser keys symbol extraction off the basename,
+    not the temp path. Copy the basename onto the temp file path by creating
+    a hardlink in the same dir with the real filename. Falls back to bare path
+    if linking fails (parser will then fall back to filename-only stem)."""
+    safe_name = os.path.basename(original_name).replace("/", "_").replace("\\", "_")
+    link_path = os.path.join(os.path.dirname(path), safe_name)
+    try:
+        if not os.path.exists(link_path):
+            os.link(path, link_path)
+        return link_path
+    except OSError:
+        return path
 
 
 @router.get("/summary", response_model=list[schemas.MarketDataSummaryRow])
@@ -100,201 +170,61 @@ def get_bars(
     symbol: str,
     from_dt: str = Query(..., alias="from"),
     to_dt: str = Query(..., alias="to"),
-    timeframe: str = "1m",
+    timeframe: str = "m5",
     db: Session = Depends(get_db),
 ):
+    """Return bars for the trade chart. Matching is intentionally loose:
+    - first try an exact symbol match (after stripping the exchange suffix);
+    - else fall back to **root prefix** (`FGBLU6.CME` -> any symbol starting
+      with `FGBL`).
+    This lets a trade on a specific contract month draw on tick data uploaded
+    under a slightly different naming convention.
+    """
     try:
         start = datetime.fromisoformat(from_dt)
         end = datetime.fromisoformat(to_dt)
     except ValueError:
         raise HTTPException(400, "Bad ISO datetime in from/to")
+
+    stripped = symbol.split(".")[0]  # 'FGBLU6.CME' -> 'FGBLU6'
+    root = extract_root(symbol) or stripped
+
+    # 1) Exact match on the stripped symbol
     rows = db.execute(
         select(models.MarketDataBar).where(
-            models.MarketDataBar.symbol == symbol,
+            models.MarketDataBar.symbol == stripped,
+            models.MarketDataBar.timeframe == timeframe,
+            models.MarketDataBar.ts >= start,
+            models.MarketDataBar.ts <= end,
+        ).order_by(models.MarketDataBar.ts)
+    ).scalars().all()
+    if rows:
+        return rows
+
+    # 2) Root-prefix fallback. Take the contract whose bars overlap the trade
+    # window most (highest bar count); fall back to all-matching bars otherwise.
+    candidates = db.execute(
+        select(models.MarketDataBar.symbol, func.count(models.MarketDataBar.id))
+        .where(
+            models.MarketDataBar.symbol.like(f"{root}%"),
+            models.MarketDataBar.timeframe == timeframe,
+            models.MarketDataBar.ts >= start,
+            models.MarketDataBar.ts <= end,
+        ).group_by(models.MarketDataBar.symbol)
+        .order_by(func.count(models.MarketDataBar.id).desc())
+    ).all()
+    if not candidates:
+        return []
+    best_symbol = candidates[0][0]
+    rows = db.execute(
+        select(models.MarketDataBar).where(
+            models.MarketDataBar.symbol == best_symbol,
             models.MarketDataBar.timeframe == timeframe,
             models.MarketDataBar.ts >= start,
             models.MarketDataBar.ts <= end,
         ).order_by(models.MarketDataBar.ts)
     ).scalars().all()
     return rows
-
-
-@router.post("/upload-scid", response_model=schemas.MarketDataUploadResult)
-async def upload_scid(
-    file: UploadFile = File(...),
-    symbol: str = Form(...),
-    timeframe: str = Form("1m"),
-    price_divisor: Optional[float] = Form(None),
-    db: Session = Depends(get_db),
-):
-    """Read a Sierra Chart .scid binary file directly.  Streams the upload to disk
-    in 1 MB chunks and parses records without loading the whole file into memory.
-
-    price_divisor: None = auto-detect from the instrument spec + first-record sanity check.
-    """
-    tmp = tempfile.NamedTemporaryFile(prefix="scid_", suffix=".scid", delete=False)
-    tmp_path = tmp.name
-    bytes_received = 0
-    try:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk: break
-            tmp.write(chunk)
-            bytes_received += len(chunk)
-        tmp.close()
-        if bytes_received < 96:
-            raise HTTPException(400, "File too small to be a .scid")
-        try:
-            stats = scid_file_stats(tmp_path)
-        except ValueError as e:
-            raise HTTPException(400, f"Not a valid .scid file: {e}")
-
-        return _ingest_scid_from_path(
-            db, tmp_path, symbol, timeframe, stats,
-            source="scid_upload", source_label=f"uploaded ({bytes_received/1024/1024:.1f} MB)",
-            price_divisor=price_divisor,
-        )
-    finally:
-        try: os.unlink(tmp_path)
-        except OSError: pass
-
-
-def _auto_divisor(path: str, symbol: str) -> float:
-    """Sniff the first record of a .scid file and decide whether prices need division.
-
-    Sierra stores .scid prices as float32, but for some CME index futures (MNQ, MES, etc.)
-    those values are integer ticks ×100 of the displayed price. We detect by peeking
-    at the first record's close and comparing against the instrument spec's divisor.
-    """
-    from ..scid_reader import iter_records_path
-    spec = get_spec(symbol)
-    spec_div = spec.get("price_divisor", 1.0) or 1.0
-    if spec_div <= 1:
-        return 1.0
-    try:
-        first = next(iter_records_path(path))
-    except StopIteration:
-        return 1.0
-    # If the raw value looks like an integer-tick representation (e.g. 2723050 for MNQ),
-    # apply the divisor.  Otherwise leave it alone.
-    if first.c > 50_000:
-        return spec_div
-    return 1.0
-
-
-def _ingest_scid_from_path(db: Session, path: str, symbol: str, timeframe: str,
-                           stats: dict, source: str, source_label: str,
-                           price_divisor: Optional[float] = None,
-                           ) -> schemas.MarketDataUploadResult:
-    """Aggregate a .scid file into bars + bulk-upsert.  Applies price_divisor to OHLC."""
-    if price_divisor is None:
-        price_divisor = _auto_divisor(path, symbol)
-    inv = 1.0 / price_divisor if price_divisor else 1.0
-
-    batch: list[dict] = []
-    BATCH = 5000
-    inserted_total = 0
-    bar_count = 0
-    earliest = None
-    latest = None
-
-    def flush():
-        nonlocal inserted_total, batch
-        if not batch:
-            return
-        stmt = (
-            pg_insert(models.MarketDataBar)
-            .values(batch)
-            .on_conflict_do_nothing(index_elements=["symbol", "timeframe", "ts"])
-            .returning(models.MarketDataBar.id)
-        )
-        result = db.execute(stmt)
-        inserted_total += len(result.fetchall())
-        batch = []
-
-    for b in read_scid_path(path, timeframe=timeframe):
-        bar_count += 1
-        if earliest is None or b.ts < earliest: earliest = b.ts
-        if latest is None or b.ts > latest: latest = b.ts
-        batch.append({
-            "symbol": symbol, "timeframe": timeframe, "ts": b.ts,
-            "o": b.o * inv, "h": b.h * inv, "l": b.l * inv, "c": b.c * inv, "v": b.v,
-            "source": source,
-        })
-        if len(batch) >= BATCH:
-            flush()
-    flush()
-    db.commit()
-    skipped = bar_count - inserted_total
-
-    notes = [
-        f"Source: {source_label}",
-        f".scid version {stats['version']}, {stats['record_count']:,} raw records, {stats['size_bytes']/1024/1024:.1f} MB",
-        f"Aggregated to {bar_count:,} {timeframe} bars (inserted {inserted_total:,}, skipped {skipped:,} duplicates)",
-        (f"Auto-detected price divisor {price_divisor:g} for {symbol}" if price_divisor != 1
-         else "Prices read at native scale (divisor 1)"),
-    ]
-    return schemas.MarketDataUploadResult(
-        symbol=symbol, timeframe=timeframe,
-        parsed=bar_count, inserted=inserted_total, skipped_duplicates=skipped,
-        price_divisor=price_divisor, earliest=earliest, latest=latest, notes=notes,
-    )
-
-
-SIERRA_MOUNT = os.environ.get("SIERRA_DATA_PATH", "/sierra-data")
-
-
-@router.get("/sierra/files")
-def list_sierra_files():
-    """List .scid files in the bind-mounted Sierra Data folder (if configured).
-
-    Mount your Sierra Data folder in docker-compose:
-      volumes:
-        - "/path/to/SierraChart/Data:/sierra-data:ro"
-    """
-    if not os.path.isdir(SIERRA_MOUNT):
-        return {"mounted": False, "path": SIERRA_MOUNT, "files": [],
-                "hint": "Add a bind-mount of your Sierra Chart Data folder to /sierra-data in docker-compose.yml"}
-    files = []
-    for name in sorted(os.listdir(SIERRA_MOUNT)):
-        if name.lower().endswith(".scid"):
-            full = os.path.join(SIERRA_MOUNT, name)
-            try:
-                st = os.stat(full)
-                files.append({
-                    "filename": name,
-                    "size_bytes": st.st_size,
-                    "modified": st.st_mtime,
-                })
-            except OSError:
-                continue
-    return {"mounted": True, "path": SIERRA_MOUNT, "files": files}
-
-
-@router.post("/sierra/import", response_model=schemas.MarketDataUploadResult)
-def import_sierra_file(
-    filename: str = Form(...),
-    symbol: str = Form(...),
-    timeframe: str = Form("1m"),
-    price_divisor: Optional[float] = Form(None),
-    db: Session = Depends(get_db),
-):
-    """Import a .scid file from the mounted Sierra Data folder."""
-    if not os.path.isdir(SIERRA_MOUNT):
-        raise HTTPException(400, "Sierra Data folder not mounted. See /api/market-data/sierra/files.")
-    safe = os.path.basename(filename)
-    full = os.path.join(SIERRA_MOUNT, safe)
-    if not os.path.isfile(full):
-        raise HTTPException(404, f"File not found: {safe}")
-    try:
-        stats = scid_file_stats(full)
-    except ValueError as e:
-        raise HTTPException(400, f"Not a valid .scid file: {e}")
-    return _ingest_scid_from_path(
-        db, full, symbol, timeframe, stats,
-        source="scid_folder", source_label=f"/sierra-data/{safe}",
-        price_divisor=price_divisor,
-    )
 
 
 @router.delete("/symbol/{symbol}")
@@ -306,86 +236,23 @@ def delete_symbol(symbol: str, timeframe: Optional[str] = None, db: Session = De
     return {"deleted": n}
 
 
-@router.post("/yahoo-fetch", response_model=schemas.YahooFetchResult)
-def yahoo_fetch(
-    symbol: str = Form(...),
-    timeframe: str = Form("1m"),
-    days: int = Form(7),
-    db: Session = Depends(get_db),
-):
-    """Best-effort Yahoo Finance fetch for continuous front-month contract.
-    Limitations: 1m bars only available for last ~7 days, 5m for ~60 days.
-    Specific contracts (e.g. MNQM6) aren't on Yahoo — we use continuous (MNQ=F).
-    """
-    notes: list[str] = []
-    try:
-        import yfinance as yf  # type: ignore
-    except ImportError:
-        raise HTTPException(503, "yfinance not installed in this environment")
-
-    root = extract_root(symbol)
-    yahoo_symbol = _to_yahoo(root)
-    if not yahoo_symbol:
-        raise HTTPException(400, f"No Yahoo symbol mapping for root '{root}'")
-
-    interval_map = {"1m": "1m", "2m": "2m", "5m": "5m", "15m": "15m", "30m": "30m",
-                    "60m": "60m", "1h": "60m", "1d": "1d"}
-    yf_interval = interval_map.get(timeframe, "1m")
-
-    try:
-        df = yf.download(yahoo_symbol, period=f"{days}d", interval=yf_interval,
-                         progress=False, threads=False)
-    except Exception as e:
-        raise HTTPException(502, f"Yahoo fetch failed: {e}")
-    if df is None or df.empty:
-        return schemas.YahooFetchResult(symbol=symbol, yahoo_symbol=yahoo_symbol,
-                                        timeframe=timeframe, bars=0,
-                                        notes=["Yahoo returned no data."])
-
-    existing_ts = set(db.execute(
-        select(models.MarketDataBar.ts).where(
-            models.MarketDataBar.symbol == symbol,
-            models.MarketDataBar.timeframe == timeframe,
-        )
-    ).scalars().all())
-
-    inserted = 0
-    for idx, row in df.iterrows():
-        ts = idx.to_pydatetime()
-        # Strip timezone — store naive UTC
-        if ts.tzinfo is not None:
-            ts = ts.astimezone().replace(tzinfo=None)
-        if ts in existing_ts:
-            continue
-        try:
-            o = float(row["Open"]); h = float(row["High"])
-            l = float(row["Low"]); c = float(row["Close"])
-            v = float(row.get("Volume", 0) or 0)
-        except (ValueError, TypeError, KeyError):
-            continue
-        db.add(models.MarketDataBar(
-            symbol=symbol, timeframe=timeframe, ts=ts,
-            o=o, h=h, l=l, c=c, v=v, source="yahoo",
-        ))
-        inserted += 1
+@router.delete("/all")
+def delete_all(db: Session = Depends(get_db)):
+    """Wipe every cached bar. Used when switching data sources."""
+    n = db.query(models.MarketDataBar).count()
+    db.query(models.MarketDataBar).delete()
     db.commit()
-    notes.append(f"Fetched {len(df)} rows from Yahoo, inserted {inserted}.")
-    notes.append("Yahoo uses continuous front-month contracts; specific months unsupported.")
-    return schemas.YahooFetchResult(
-        symbol=symbol, yahoo_symbol=yahoo_symbol, timeframe=timeframe,
-        bars=inserted, notes=notes,
-    )
+    return {"deleted": n}
 
 
-_YAHOO_ROOTS = {
-    "MNQ": "MNQ=F", "MES": "MES=F", "MYM": "MYM=F", "M2K": "M2K=F",
-    "NQ": "NQ=F", "ES": "ES=F", "YM": "YM=F", "RTY": "RTY=F",
-    "GC": "GC=F", "MGC": "MGC=F", "SI": "SI=F", "SIL": "SIL=F",
-    "CL": "CL=F", "MCL": "MCL=F", "NG": "NG=F",
-    "MBT": "MBT=F", "MET": "MET=F",
-    "6E": "6E=F", "M6E": "M6E=F",
-}
+# --- Symbol normalization helper exposed for the frontend ----------------
+_CONTRACT_RE = re.compile(r'^([A-Z0-9]{1,4}?)([FGHJKMNQUVXZ])(\d{1,2})(?:\.[A-Z]+)?$')
 
 
-def _to_yahoo(root: str) -> Optional[str]:
-    return _YAHOO_ROOTS.get(root)
+@router.get("/symbol-for-trade")
+def symbol_for_trade(trade_symbol: str):
+    """Given a trade.symbol (e.g. 'FGBLU6.CME'), return what symbol the chart
+    will end up using based on what's in the DB. Diagnostic-only."""
+    stripped = trade_symbol.split(".")[0]
+    root = extract_root(trade_symbol) or stripped
+    return {"trade_symbol": trade_symbol, "stripped": stripped, "root": root}

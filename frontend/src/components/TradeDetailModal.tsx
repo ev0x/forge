@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, Trade, Execution, Strategy, fmtUsd, fmtDuration } from '../lib/api'
+import { useDateFmt } from '../lib/timezone'
 import StarRating from './StarRating'
 import PlannedLevelInput from './PlannedLevelInput'
 import MistakeTagInput from './MistakeTagInput'
@@ -23,6 +24,7 @@ export default function TradeDetailModal({
   const [saving, setSaving] = useState(false)
   const [attachRefreshKey, setAttachRefreshKey] = useState(0)
   const [pasteHint, setPasteHint] = useState('')
+  const fmt = useDateFmt()
 
   useEffect(() => { setT(trade); api.trades.executions(trade.id).then(setExecutions) }, [trade.id]) // eslint-disable-line
 
@@ -101,7 +103,7 @@ export default function TradeDetailModal({
               )}
             </div>
             <div className="text-xs text-muted mt-1 num">
-              {new Date(t.entry_time).toLocaleString()} → {new Date(t.exit_time).toLocaleString()}
+              {fmt(t.entry_time)} → {fmt(t.exit_time)}
               <span className="ml-2">({fmtDuration(t.duration_seconds)})</span>
             </div>
           </div>
@@ -199,7 +201,7 @@ export default function TradeDetailModal({
               <tbody>
                 {executions.map(e => (
                   <tr key={e.id} className="border-t border-border">
-                    <td className="px-3 py-2">{new Date(e.fill_time).toLocaleTimeString()}</td>
+                    <td className="px-3 py-2">{fmt(e.fill_time, { timeOnly: true, second: true })}</td>
                     <td className={`px-3 py-2 ${e.side === 'Buy' ? 'text-win' : 'text-loss'}`}>{e.side}</td>
                     <td className="px-3 py-2 text-right num">{e.quantity}</td>
                     <td className="px-3 py-2 text-right num">{e.fill_price.toFixed(2)}</td>

@@ -12,6 +12,29 @@ from .prop import compute_prop_status, _parse_caps, _cap_for_payout
 from .services import _current_equity_from_broker_or_trades
 
 
+def _nudge_to_business_day(d: datetime) -> datetime:
+    """If `d` is Sat/Sun, advance to next Monday. Returns `d` unchanged on weekdays."""
+    while d.weekday() >= 5:   # 5=Sat, 6=Sun
+        d += timedelta(days=1)
+    return d
+
+
+def _business_days_offset(start: datetime, business_days: int) -> tuple[int, datetime]:
+    """Returns (calendar_days_offset, target_date) where target_date is `business_days`
+    weekdays after `start`. If business_days<=0 returns (0, start)."""
+    if business_days <= 0:
+        return 0, start
+    d = start
+    remaining = business_days
+    cal_days = 0
+    while remaining > 0:
+        d += timedelta(days=1)
+        cal_days += 1
+        if d.weekday() < 5:
+            remaining -= 1
+    return cal_days, d
+
+
 def _account_recent_avg(trades, n_days=10):
     if not trades:
         return 0.0
@@ -42,18 +65,20 @@ def compute_account_etas(db: Session, accounts: list[models.Account]) -> list[di
         if a.status == "blown":
             blocked = "Account blown"
 
-        # Eval -> funded ETA: distance to profit target
+        # Eval -> funded ETA: distance to profit target. Personal accounts have
+        # no eval cycle so they're skipped. `avg` is per-trading-day; we convert
+        # to calendar days by stepping forward on weekdays only.
         days_to_funded: Optional[int] = None
         eta_funded: Optional[datetime] = None
-        if a.account_type in ("eval", "personal") and a.profit_target > 0 and not blocked:
+        if a.account_type == "eval" and a.profit_target > 0 and not blocked:
             target_equity = a.starting_balance + a.profit_target
             need = target_equity - current_equity
             if need <= 0:
                 days_to_funded = 0
                 eta_funded = today
             elif avg > 0:
-                days_to_funded = int(need / avg) + 1
-                eta_funded = today + timedelta(days=days_to_funded)
+                trading_days_needed = int(need / avg) + 1
+                days_to_funded, eta_funded = _business_days_offset(today, trading_days_needed)
 
         # Funded -> payout ETAs
         caps = _parse_caps(a.payout_caps)
@@ -68,30 +93,46 @@ def compute_account_etas(db: Session, accounts: list[models.Account]) -> list[di
         max_amount = max_for_next
 
         if a.account_type in ("pa", "funded") and not blocked:
-            # Need equity >= safety_net_balance + payout_amount
+            # Need equity >= safety_net_balance + payout_amount.
+            # `avg` is per-trading-day, so the days needed is in trading days —
+            # convert to a calendar offset that skips weekends.
             need_min = (safety_net_balance + min_amount) - current_equity
             need_max = (safety_net_balance + max_amount) - current_equity
             if avg > 0:
                 if need_min <= 0:
                     days_to_min = 0; eta_min = today
                 else:
-                    days_to_min = int(need_min / avg) + 1
-                    eta_min = today + timedelta(days=days_to_min)
+                    tdn_min = int(need_min / avg) + 1
+                    days_to_min, eta_min = _business_days_offset(today, tdn_min)
                 if need_max <= 0:
                     days_to_max = 0; eta_max = today
                 else:
-                    days_to_max = int(need_max / avg) + 1
-                    eta_max = today + timedelta(days=days_to_max)
-            # Respect min trading days constraint
+                    tdn_max = int(need_max / avg) + 1
+                    days_to_max, eta_max = _business_days_offset(today, tdn_max)
+            # Respect min trading-days constraint (counted in trading days, so
+            # also expressed as business-day offsets here).
             trading_days_used = len({t.exit_time.date() for t in trades})
-            min_days_needed = max(0, (a.min_trading_days_before_payout or 0) - trading_days_used)
-            if min_days_needed > 0:
-                if days_to_min is not None:
-                    days_to_min = max(days_to_min, min_days_needed)
-                    eta_min = today + timedelta(days=days_to_min)
-                if days_to_max is not None:
-                    days_to_max = max(days_to_max, min_days_needed)
-                    eta_max = today + timedelta(days=days_to_max)
+            min_td_needed = max(0, (a.min_trading_days_before_payout or 0) - trading_days_used)
+            if min_td_needed > 0:
+                min_cal, min_eta = _business_days_offset(today, min_td_needed)
+                if days_to_min is not None and min_cal > days_to_min:
+                    days_to_min = min_cal; eta_min = min_eta
+                if days_to_max is not None and min_cal > days_to_max:
+                    days_to_max = min_cal; eta_max = min_eta
+            # Spacing — firm's min-days-between-payouts is calendar days, but
+            # the ETA still needs to land on a trading day.
+            spacing = a.min_days_between_payouts or 0
+            if spacing > 0 and payouts:
+                last_payout_dt = max(p.payout_date for p in payouts)
+                since = (today - last_payout_dt).days
+                wait_days = max(0, spacing - since)
+                if wait_days > 0:
+                    candidate = _nudge_to_business_day(today + timedelta(days=wait_days))
+                    cal_wait = (candidate - today).days
+                    if days_to_min is not None and cal_wait > days_to_min:
+                        days_to_min = cal_wait; eta_min = candidate
+                    if days_to_max is not None and cal_wait > days_to_max:
+                        days_to_max = cal_wait; eta_max = candidate
 
         out.append({
             "account_id": a.id,
@@ -132,6 +173,13 @@ def compute_payout_forecast(db: Session, accounts: list[models.Account]) -> dict
         if avg <= 0:
             continue
 
+        # Resolve the firm's profit-split for this account.
+        trader_split = 1.0
+        if a.prop_firm_key:
+            firm_def = db.query(models.PropFirmDef).filter_by(key=a.prop_firm_key).first()
+            if firm_def and firm_def.trader_profit_split_pct is not None:
+                trader_split = float(firm_def.trader_profit_split_pct)
+
         caps = _parse_caps(a.payout_caps)
         safety_net_balance = (a.starting_balance + (a.starting_balance_offset or 0)
                               + (a.safety_net_amount or 0) + (a.extra_safety_buffer or 0))
@@ -163,16 +211,22 @@ def compute_payout_forecast(db: Session, accounts: list[models.Account]) -> dict
                 break
             needed_equity = safety_net_balance + amount
             need = needed_equity - eq
-            days = max(1, int(need / avg) + 1) if need > 0 else 1
-            # Min trading days constraint
+            # `avg` is per-trading-day; the cursor advances on the calendar so
+            # convert via business-day stepping.
+            trading_days_needed = max(1, int(need / avg) + 1) if need > 0 else 1
+            cal_for_pnl, _ = _business_days_offset(cursor, trading_days_needed)
+            days = cal_for_pnl
+            # Min trading-days-before-payout — also in trading days, convert.
             min_trading_days_remaining = max(0, (a.min_trading_days_before_payout or 0) - trading_days_used)
-            days = max(days, min_trading_days_remaining)
-            # Spacing constraint
+            if min_trading_days_remaining > 0:
+                cal_for_min, _ = _business_days_offset(cursor, min_trading_days_remaining)
+                days = max(days, cal_for_min)
+            # Spacing — calendar-day rule from the firm.
             if last_payout_dt and (a.min_days_between_payouts or 0) > 0:
                 since = (cursor - last_payout_dt).days
                 gap_needed = max(0, (a.min_days_between_payouts or 0) - since)
                 days = max(days, gap_needed)
-            cursor = cursor + timedelta(days=days)
+            cursor = _nudge_to_business_day(cursor + timedelta(days=days))
             if (cursor - today).days > horizon_days:
                 break
             eq = eq + days * avg - amount
@@ -182,6 +236,8 @@ def compute_payout_forecast(db: Session, accounts: list[models.Account]) -> dict
                 "predicted_date": cursor,
                 "amount": round(amount, 2),
                 "payout_number": n,
+                "amount_to_trader": round(amount * trader_split, 2),
+                "trader_split_pct": trader_split,
             })
             n_payouts += 1
             trading_days_used += days
@@ -208,10 +264,13 @@ def compute_payout_forecast(db: Session, accounts: list[models.Account]) -> dict
             "end_date": end,
             "payouts": items,
             "total": round(sum(p["amount"] for p in items), 2),
+            "total_to_trader": round(sum(p.get("amount_to_trader", p["amount"]) for p in items), 2),
         })
+    horizon = [p for p in all_predicted if (p["predicted_date"] - today).days <= 180]
     return {
         "buckets": buckets,
-        "total_next_6_months": round(sum(p["amount"] for p in all_predicted if (p["predicted_date"] - today).days <= 180), 2),
+        "total_next_6_months": round(sum(p["amount"] for p in horizon), 2),
+        "total_next_6_months_to_trader": round(sum(p.get("amount_to_trader", p["amount"]) for p in horizon), 2),
         "all_predicted": all_predicted,
     }
 

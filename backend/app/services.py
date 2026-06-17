@@ -358,12 +358,17 @@ def evaluate_account_lifecycle(db: Session, acct: models.Account, realized_pnl: 
         acct.blow_reason = None
         return True
 
-    # 2) Target hit -> funded
+    # 2) Target hit. Eval accounts move to 'passed_eval' (intermediate state — the
+    # user manually transitions them to 'pa'/'funded' once they pay the activation
+    # fee). PA / funded accounts that re-hit target stay 'funded'.
     target = acct.profit_target or 0
     if target <= 0:
         return False
     if current_equity >= starting + target and acct.status == "active":
-        acct.status = "funded"
+        if (acct.account_type or "").lower() == "eval":
+            acct.status = "passed_eval"
+        else:
+            acct.status = "funded"
         if not acct.passed_eval_date:
             acct.passed_eval_date = datetime.utcnow()
         return True
@@ -424,6 +429,7 @@ def insert_executions(
             low_during_position=f.low_during_position,
             note=f.note,
             is_automated=f.is_automated,
+            commission=f.commission,
         )
         db.add(ex)
         existing_keys.add((acct.id, f.fill_id))

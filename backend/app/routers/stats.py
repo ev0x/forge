@@ -37,13 +37,31 @@ def get_stats(
         starting = sum(a.starting_balance or 0 for a in accts)
         total_payouts = sum(p.amount for p in db.query(models.Payout).all())
 
-    # Broker balance reconciliation — when ALL selected accounts have broker_balance set,
-    # we report the broker_total as authoritative current_equity on the dashboard.
+    # Broker balance reconciliation. We compute current_equity PER ACCOUNT:
+    #   - broker_balance when it's set (authoritative)
+    #   - starting_balance + offset + trade_net_pnl - payouts  otherwise
+    # …then sum across selected accounts. That way mixed coverage (e.g. 3 of 4
+    # accounts have broker entered) still gives an accurate aggregate, instead
+    # of silently falling back to a trade-only number for everyone.
     broker_accounts_covered = sum(1 for a in accts if a.broker_balance is not None)
     broker_accounts_total = len(accts)
     broker_total: Optional[float] = None
-    if broker_accounts_covered == broker_accounts_total and broker_accounts_total > 0:
-        broker_total = float(sum(a.broker_balance for a in accts))
+    if broker_accounts_covered > 0 and broker_accounts_total > 0:
+        per_account_pnl: dict[int, float] = {}
+        per_account_payouts: dict[int, float] = {}
+        for t_row in db.query(models.Trade.account_id, models.Trade.net_pnl).all():
+            per_account_pnl[t_row.account_id] = per_account_pnl.get(t_row.account_id, 0.0) + (t_row.net_pnl or 0)
+        for p_row in db.query(models.Payout.account_id, models.Payout.amount).all():
+            per_account_payouts[p_row.account_id] = per_account_payouts.get(p_row.account_id, 0.0) + (p_row.amount or 0)
+        broker_total = 0.0
+        for a in accts:
+            if a.broker_balance is not None:
+                broker_total += float(a.broker_balance)
+            else:
+                broker_total += float((a.starting_balance or 0)
+                                      + (a.starting_balance_offset or 0)
+                                      + per_account_pnl.get(a.id, 0.0)
+                                      - per_account_payouts.get(a.id, 0.0))
     if symbol:
         q = q.filter(models.Trade.symbol == symbol)
     if strategy_id:

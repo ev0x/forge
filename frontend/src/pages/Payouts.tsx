@@ -1,16 +1,35 @@
 import { useEffect, useState } from 'react'
-import { api, Account, Payout, PropStatus, fmtUsd } from '../lib/api'
+import { api, Account, Payout, PropStatus, UserSettings, fmtUsd } from '../lib/api'
 import PayoutForecastWidget from '../components/PayoutForecast'
 import PayoutsCalendar from '../components/PayoutsCalendar'
+
+type CurrencyMode = 'USD' | 'BOTH'
 
 export default function Payouts({ accounts }: { accounts: Account[] }) {
   const [payouts, setPayouts] = useState<Payout[]>([])
   const [statuses, setStatuses] = useState<Record<number, PropStatus>>({})
   const [creating, setCreating] = useState(false)
+  const [settings, setSettings] = useState<UserSettings | null>(null)
+  const [currencyMode, setCurrencyMode] = useState<CurrencyMode>(() =>
+    (localStorage.getItem('payouts.currencyMode') as CurrencyMode) || 'USD'
+  )
+  useEffect(() => { localStorage.setItem('payouts.currencyMode', currencyMode) }, [currencyMode])
+  useEffect(() => { api.settings.get().then(setSettings) }, [])
+  const secondary = settings?.secondary_currency || 'AUD'
+  const fx = settings?.secondary_currency_fx_rate || 1.5
+  function fmtSec(usd: number): string {
+    return `${secondary} ${fmtUsd(usd * fx).replace(/^\$/, '')}`
+  }
+  function fmtUsdPair(usd: number): string {
+    return currencyMode === 'BOTH' ? `${fmtUsd(usd)} · ${fmtSec(usd)}` : fmtUsd(usd)
+  }
 
-  // Only PA / funded accounts that aren't blown can take payouts.
+  // Only PA / funded accounts can take payouts. Eval accounts — even ones that
+  // have passed_eval status — still need activation/PA conversion before any
+  // payout, so skip them here. Also skip blown / closed.
   const payoutAccounts = accounts.filter(a =>
-    (a.account_type === 'pa' || a.account_type === 'funded') && a.status !== 'blown' && a.status !== 'closed'
+    (a.account_type === 'pa' || a.account_type === 'funded')
+    && a.status !== 'blown' && a.status !== 'closed'
   )
 
   const [form, setForm] = useState({
@@ -55,15 +74,60 @@ export default function Payouts({ accounts }: { accounts: Account[] }) {
     return acc
   }, {} as Record<number, number>)
 
+  async function saveFx(curr: string, rate: number) {
+    if (!settings) return
+    const updated = await api.settings.update({ secondary_currency: curr, secondary_currency_fx_rate: rate })
+    setSettings(updated)
+  }
+
   return (
     <div className="p-6 space-y-6">
+      {/* Currency / FX rate quick-edit */}
+      {settings && (
+        <div className="bg-panel border border-border rounded-lg p-3 flex items-center gap-3 flex-wrap text-xs">
+          <span className="text-muted uppercase tracking-wider">Local currency</span>
+          <select value={settings.secondary_currency}
+            onChange={e => saveFx(e.target.value, settings.secondary_currency_fx_rate)}
+            className="bg-panel2 border border-border rounded px-2 py-1 text-sm">
+            {['AUD','GBP','EUR','CAD','NZD','JPY','CHF','SGD','HKD'].map(c =>
+              <option key={c} value={c}>{c}</option>
+            )}
+            {!['AUD','GBP','EUR','CAD','NZD','JPY','CHF','SGD','HKD'].includes(settings.secondary_currency) &&
+              <option value={settings.secondary_currency}>{settings.secondary_currency}</option>}
+          </select>
+          <span className="text-muted">FX rate: USD ×</span>
+          <input type="number" step="0.0001" min="0"
+            defaultValue={settings.secondary_currency_fx_rate}
+            onBlur={e => {
+              const v = parseFloat(e.target.value)
+              if (!isNaN(v) && v > 0 && v !== settings.secondary_currency_fx_rate) {
+                saveFx(settings.secondary_currency, v)
+              }
+            }}
+            className="bg-panel2 border border-border rounded px-2 py-1 text-sm num w-24" />
+          <span className="text-muted">= 1 {settings.secondary_currency}</span>
+          <span className="text-[10px] text-muted ml-auto">Applies to forecast + payouts here and on the dashboard.</span>
+        </div>
+      )}
+
       <PayoutForecastWidget />
 
       <PayoutsCalendar accounts={accounts} />
 
       {/* Per-account next-payout cards */}
       <div>
-        <div className="text-sm font-semibold mb-3">Upcoming Payouts</div>
+        <div className="flex items-center justify-between mb-3">
+          <div className="text-sm font-semibold">Upcoming Payouts</div>
+          <div className="flex items-center gap-1 bg-panel border border-border rounded-md p-1 text-xs">
+            <button onClick={() => setCurrencyMode('USD')}
+              className={`px-2.5 py-0.5 rounded ${currencyMode === 'USD' ? 'bg-panel2 text-text' : 'text-muted hover:text-text'}`}>USD</button>
+            <button onClick={() => setCurrencyMode('BOTH')}
+              className={`px-2.5 py-0.5 rounded ${currencyMode === 'BOTH' ? 'bg-panel2 text-text' : 'text-muted hover:text-text'}`}
+              title={`Show USD and ${secondary} side-by-side (FX ${fx})`}>
+              USD / {secondary}
+            </button>
+          </div>
+        </div>
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {Object.values(statuses).filter(s => s.payout_max_for_next > 0 || s.payout_min > 0).map(s => (
             <div key={s.account_id} className={`bg-panel border rounded-lg p-4 ${s.eligible_for_payout ? 'border-accent/60' : 'border-border'}`}>
@@ -85,7 +149,18 @@ export default function Payouts({ accounts }: { accounts: Account[] }) {
                 </div>
                 <div>
                   <div className="text-[10px] text-muted uppercase">Next Payout Amount</div>
-                  <div className="font-semibold num text-accent">{fmtUsd(s.payout_amount_for_next)}</div>
+                  <div className="font-semibold num text-accent">
+                    {fmtUsdPair(s.payout_amount_for_next)}
+                    {s.payout_amount_label && (
+                      <span className="ml-1 text-[10px] uppercase tracking-wider text-muted">({s.payout_amount_label})</span>
+                    )}
+                  </div>
+                  {s.trader_profit_split_pct < 1 && (
+                    <div className="text-[10px] text-muted num">
+                      yours: <span className="text-win">{fmtUsdPair(s.payout_amount_to_trader)}</span>
+                      <span className="ml-1">({Math.round(s.trader_profit_split_pct * 100)}% split)</span>
+                    </div>
+                  )}
                   <div className="text-[9px] text-muted">cap {fmtUsd(s.payout_max_for_next)} · min {fmtUsd(s.payout_min)}</div>
                 </div>
                 <div>
@@ -99,7 +174,10 @@ export default function Payouts({ accounts }: { accounts: Account[] }) {
                 </div>
                 <div>
                   <div className="text-[10px] text-muted uppercase">Distance to Payout</div>
-                  <div className="num">{fmtUsd(s.distance_to_next_payout)}</div>
+                  <div className="num">
+                    {fmtUsd(s.distance_to_next_payout)}
+                    <span className="ml-1 text-[10px] text-muted">({s.payout_amount_label || 'Max'})</span>
+                  </div>
                 </div>
                 <div>
                   <div className="text-[10px] text-muted uppercase">Avg/day (recent)</div>
@@ -194,23 +272,32 @@ export default function Payouts({ accounts }: { accounts: Account[] }) {
                 <th className="px-3 py-2 text-left">Date</th>
                 <th className="px-3 py-2 text-left">Account</th>
                 <th className="px-3 py-2 text-right">Amount</th>
+                <th className="px-3 py-2 text-right">Yours (after split)</th>
                 <th className="px-3 py-2 text-left">Notes</th>
                 <th className="px-3 py-2"></th>
               </tr>
             </thead>
             <tbody>
-              {payouts.map(p => (
-                <tr key={p.id} className="border-t border-border">
-                  <td className="px-3 py-2">{new Date(p.payout_date).toLocaleDateString()}</td>
-                  <td className="px-3 py-2">{acctMap[p.account_id]?.display_name || p.account_id}</td>
-                  <td className="px-3 py-2 text-right num text-win font-medium">{fmtUsd(p.amount)}</td>
-                  <td className="px-3 py-2 text-muted text-xs">{p.notes || ''}</td>
-                  <td className="px-3 py-2 text-right">
-                    <button onClick={() => remove(p.id)} className="text-xs text-loss/80 hover:text-loss">Delete</button>
-                  </td>
-                </tr>
-              ))}
-              {!payouts.length && <tr><td colSpan={5} className="px-3 py-6 text-center text-muted">No payouts recorded yet.</td></tr>}
+              {payouts.map(p => {
+                const split = statuses[p.account_id]?.trader_profit_split_pct ?? 1
+                const yours = p.amount * split
+                return (
+                  <tr key={p.id} className="border-t border-border">
+                    <td className="px-3 py-2">{new Date(p.payout_date).toLocaleDateString()}</td>
+                    <td className="px-3 py-2">{acctMap[p.account_id]?.display_name || p.account_id}</td>
+                    <td className="px-3 py-2 text-right num text-win font-medium">{fmtUsdPair(p.amount)}</td>
+                    <td className="px-3 py-2 text-right num text-win">
+                      {fmtUsdPair(yours)}
+                      {split < 1 && <span className="ml-1 text-[10px] text-muted">({Math.round(split * 100)}%)</span>}
+                    </td>
+                    <td className="px-3 py-2 text-muted text-xs">{p.notes || ''}</td>
+                    <td className="px-3 py-2 text-right">
+                      <button onClick={() => remove(p.id)} className="text-xs text-loss/80 hover:text-loss">Delete</button>
+                    </td>
+                  </tr>
+                )
+              })}
+              {!payouts.length && <tr><td colSpan={6} className="px-3 py-6 text-center text-muted">No payouts recorded yet.</td></tr>}
             </tbody>
           </table>
         </div>

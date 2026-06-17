@@ -1,12 +1,17 @@
 import { useEffect, useState } from 'react'
-import { api, Trade, Execution, Strategy, fmtUsd, fmtDuration } from '../lib/api'
+import { api, Account, Trade, Execution, Strategy, fmtUsd, fmtDuration } from '../lib/api'
+import { useDateFmt } from '../lib/timezone'
 import StarRating from '../components/StarRating'
 import PlannedLevelInput from '../components/PlannedLevelInput'
 import MistakeTagInput from '../components/MistakeTagInput'
 import TagInput from '../components/TagInput'
 import TradeDetailModal from '../components/TradeDetailModal'
 
-export default function Trades({ accountIds }: { accountIds?: number[] }) {
+export default function Trades({ accountIds, accounts }: { accountIds?: number[]; accounts: Account[] }) {
+  const acctNameById: Record<number, string> = Object.fromEntries(
+    accounts.map(a => [a.id, a.display_name])
+  )
+  const fmt = useDateFmt()
   const [trades, setTrades] = useState<Trade[]>([])
   const [strategies, setStrategies] = useState<Strategy[]>([])
   const [loading, setLoading] = useState(true)
@@ -60,7 +65,7 @@ export default function Trades({ accountIds }: { accountIds?: number[] }) {
           <table className="w-full text-sm">
             <thead className="bg-panel2 text-xs uppercase text-muted">
               <tr>
-                <Th>Date</Th><Th>Symbol</Th><Th>Side</Th>
+                <Th>Date</Th><Th>Account</Th><Th>Symbol</Th><Th>Side</Th>
                 <Th className="text-right">Qty</Th>
                 <Th className="text-right">Entry</Th>
                 <Th className="text-right">Exit</Th>
@@ -75,7 +80,8 @@ export default function Trades({ accountIds }: { accountIds?: number[] }) {
               {trades.map(t => (
                 <tr key={t.id} onClick={() => setSelected(t)}
                   className="border-t border-border hover:bg-panel2/60 cursor-pointer">
-                  <Td>{new Date(t.entry_time).toLocaleString()}</Td>
+                  <Td>{fmt(t.entry_time)}</Td>
+                  <Td className="text-xs text-muted whitespace-nowrap">{acctNameById[t.account_id] || `#${t.account_id}`}</Td>
                   <Td className="font-medium">{t.symbol}</Td>
                   <Td>
                     <span className={`text-xs px-1.5 py-0.5 rounded ${t.side === 'Long' ? 'bg-win/15 text-win' : 'bg-loss/15 text-loss'}`}>
@@ -99,7 +105,7 @@ export default function Trades({ accountIds }: { accountIds?: number[] }) {
                   </Td>
                 </tr>
               ))}
-              {!trades.length && <tr><td colSpan={11} className="px-4 py-8 text-center text-muted">No trades</td></tr>}
+              {!trades.length && <tr><td colSpan={12} className="px-4 py-8 text-center text-muted">No trades</td></tr>}
             </tbody>
           </table>
         </div>

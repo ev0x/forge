@@ -72,6 +72,10 @@ export type PropFirm = {
   default_payout_min: number
   verified_at: string | null; notes: string | null
   is_custom: boolean; archived: boolean
+  discount_code: string | null
+  discount_pct: number              // 0..1
+  discount_expires: string | null
+  trader_profit_split_pct: number   // 0..1
   plans: PropFirmPlan[]
 }
 
@@ -91,19 +95,23 @@ export type UserSettings = {
   pa_playbook_id: number | null; eval_playbook_id: number | null
   timezone: string
   date_by: 'exit' | 'entry'
+  secondary_currency: string             // e.g. 'AUD'
+  secondary_currency_fx_rate: number     // USD × rate = secondary
 }
 
 export type ForecastedPayout = {
   account_id: number; account_name: string
   predicted_date: string; amount: number; payout_number: number
+  amount_to_trader: number; trader_split_pct: number
 }
 export type ForecastBucket = {
   label: string; end_date: string
-  payouts: ForecastedPayout[]; total: number
+  payouts: ForecastedPayout[]; total: number; total_to_trader: number
 }
 export type PayoutForecast = {
   buckets: ForecastBucket[]
   total_next_6_months: number
+  total_next_6_months_to_trader: number
   all_predicted: ForecastedPayout[]
 }
 
@@ -159,6 +167,8 @@ export type MarketDataUploadResult = {
   earliest: string | null; latest: string | null
   notes: string[]
 }
+// Deprecated — Yahoo fetch removed when switching to NinjaTrader tick imports.
+// Type kept only because TradeDetailModal still imports it; can drop later.
 export type YahooFetchResult = {
   symbol: string; yahoo_symbol: string; timeframe: string
   bars: number; notes: string[]
@@ -266,7 +276,11 @@ export type StatCards = {
 
 export type EquityPoint = { t: string; equity: number; trade_id: number }
 export type DrawdownPoint = { t: string; drawdown: number; trade_id: number }
-export type DailyPnl = { date: string; net_pnl: number; trade_count: number; win_count: number; loss_count: number }
+export type DailyPnl = {
+  date: string; net_pnl: number; trade_count: number; win_count: number; loss_count: number
+  long_pnl: number; short_pnl: number
+  gross_wins: number; gross_losses: number
+}
 export type BreakdownRow = { key: string; net_pnl: number; trade_count: number; win_rate: number }
 export type PnlBucket = { bucket: string; count: number; low: number; high: number }
 export type InsightSub = { key: string; label: string; score: number; weight: number; value_display: string }
@@ -297,6 +311,9 @@ export type PropStatus = {
   available_above_safety_net: number
   payout_preference: 'min' | 'max' | 'custom'
   payout_min: number; payout_max_for_next: number; payout_amount_for_next: number
+  payout_amount_label: string            // 'Min' | 'Max' | 'Custom' | 'Clamped'
+  trader_profit_split_pct: number        // firm's split (1.0 = trader keeps 100%)
+  payout_amount_to_trader: number        // payout_amount_for_next × split
   distance_to_next_payout: number
   eligible_for_payout: boolean; eligibility_reason: string | null
   trading_days_used: number
@@ -428,41 +445,21 @@ export const api = {
   },
   marketData: {
     summary: () => req<MarketDataSummaryRow[]>('/api/market-data/summary'),
-    bars: (symbol: string, fromDt: string, toDt: string, timeframe = '1m') =>
+    timeframes: () => req<Array<{label: string; seconds: number}>>('/api/market-data/timeframes'),
+    bars: (symbol: string, fromDt: string, toDt: string, timeframe = 'm5') =>
       req<MarketDataBar[]>(`/api/market-data/bars?${qs({ symbol, from: fromDt, to: toDt, timeframe })}`),
-    upload: async (file: File, symbol: string, timeframe = '1m', priceDivisor?: number) => {
+    uploadNTTick: async (file: File, symbolOverride?: string) => {
       const fd = new FormData()
-      fd.append('file', file); fd.append('symbol', symbol); fd.append('timeframe', timeframe)
-      if (priceDivisor != null) fd.append('price_divisor', String(priceDivisor))
-      const r = await fetch(`${BASE}/api/market-data/upload`, { method: 'POST', body: fd })
+      fd.append('file', file)
+      if (symbolOverride) fd.append('symbol_override', symbolOverride)
+      const r = await fetch(`${BASE}/api/market-data/upload-nt-tick`, { method: 'POST', body: fd })
       if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
       return r.json() as Promise<MarketDataUploadResult>
-    },
-    uploadScid: async (file: File, symbol: string, timeframe = '1m') => {
-      const fd = new FormData()
-      fd.append('file', file); fd.append('symbol', symbol); fd.append('timeframe', timeframe)
-      const r = await fetch(`${BASE}/api/market-data/upload-scid`, { method: 'POST', body: fd })
-      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
-      return r.json() as Promise<MarketDataUploadResult>
-    },
-    sierraFiles: () => req<{mounted: boolean; path: string; files: Array<{filename: string; size_bytes: number; modified: number}>; hint?: string}>('/api/market-data/sierra/files'),
-    sierraImport: async (filename: string, symbol: string, timeframe = '1m') => {
-      const fd = new FormData()
-      fd.append('filename', filename); fd.append('symbol', symbol); fd.append('timeframe', timeframe)
-      const r = await fetch(`${BASE}/api/market-data/sierra/import`, { method: 'POST', body: fd })
-      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
-      return r.json() as Promise<MarketDataUploadResult>
-    },
-    yahooFetch: async (symbol: string, timeframe = '1m', days = 7) => {
-      const fd = new FormData()
-      fd.append('symbol', symbol); fd.append('timeframe', timeframe); fd.append('days', String(days))
-      const r = await fetch(`${BASE}/api/market-data/yahoo-fetch`, { method: 'POST', body: fd })
-      if (!r.ok) throw new Error(`${r.status}: ${await r.text()}`)
-      return r.json() as Promise<YahooFetchResult>
     },
     deleteSymbol: (symbol: string, timeframe?: string) =>
       req<{deleted:number}>(`/api/market-data/symbol/${encodeURIComponent(symbol)}?${qs({ timeframe })}`,
         { method: 'DELETE' }),
+    deleteAll: () => req<{deleted:number}>('/api/market-data/all', { method: 'DELETE' }),
   },
   tradeAccountData: {
     scan: () => req<{

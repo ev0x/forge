@@ -9,6 +9,16 @@
 data/
 sierra-data/
 
+# Trade/tick exports the user drops at the repo root for ad-hoc imports.
+# These contain real account IDs, balances, prices — never commit.
+# Root-only globs (leading /) so backend/requirements.txt, etc. stay tracked.
+/*.csv
+/*.txt
+# NinjaTrader tick text exports anywhere in the tree (e.g. "FGBL 03-26.Last.txt").
+*.Last.txt
+*.Bid.txt
+*.Ask.txt
+
 # Claude Code & editor metadata
 .claude/
 .vscode/

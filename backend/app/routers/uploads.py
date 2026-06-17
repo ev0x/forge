@@ -6,6 +6,7 @@ from .. import models, schemas
 from ..db import get_db
 from ..parser import parse_sierra_fills
 from ..nt_parser import parse_ninjatrader_executions, looks_like_ninjatrader_csv
+from ..tradovate_parser import parse_tradovate_fills, looks_like_tradovate_fills_csv
 from ..services import insert_executions, rebuild_trades_for_account, store_upload
 
 router = APIRouter(prefix="/api/uploads", tags=["uploads"])
@@ -21,9 +22,13 @@ async def upload_sierra(file: UploadFile = File(...), db: Session = Depends(get_
 
     stored_name, path = store_upload(UPLOAD_DIR, file.filename or "upload.txt", content)
 
-    # Detect Sierra vs NinjaTrader by header sniffing
+    # Detect Sierra / NinjaTrader / Tradovate by header sniffing. Tradovate's
+    # fills export shares the .csv extension with NT but has a different header.
     head_text = content[:4096].decode("utf-8", errors="replace")
-    if looks_like_ninjatrader_csv(head_text):
+    if looks_like_tradovate_fills_csv(head_text):
+        detected_format = "tradovate"
+        fills = list(parse_tradovate_fills(path))
+    elif looks_like_ninjatrader_csv(head_text):
         detected_format = "ninjatrader"
         fills = list(parse_ninjatrader_executions(path))
     else:

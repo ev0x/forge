@@ -75,9 +75,23 @@ export default function PropFirms({ accounts, onChange }: { accounts: Account[];
                   {firm.default_drawdown_mode.replace('_', ' ')} drawdown ·
                   consistency {Math.round(firm.default_consistency_rule_pct * 100)}% ·
                   min {firm.default_min_trading_days_before_payout} trading days ·
-                  min payout {fmtUsd(firm.default_payout_min)}
+                  min payout {fmtUsd(firm.default_payout_min)} ·
+                  trader split {Math.round((firm.trader_profit_split_pct ?? 1) * 100)}%
                   {firm.verified_at && <span className="ml-2 opacity-50">verified {firm.verified_at}</span>}
                 </div>
+                {firm.discount_code && (
+                  <div className="mt-1 inline-flex items-center gap-2 text-[11px] bg-accent/15 text-accent px-2 py-0.5 rounded">
+                    <span className="font-mono font-semibold">{firm.discount_code}</span>
+                    {firm.discount_pct > 0 && <span>· {Math.round(firm.discount_pct * 100)}% off</span>}
+                    {firm.discount_expires && (() => {
+                      const exp = new Date(firm.discount_expires)
+                      const expired = exp.getTime() < Date.now()
+                      return <span className={expired ? 'text-loss' : 'opacity-70'}>
+                        · {expired ? 'expired' : 'expires'} {exp.toLocaleDateString()}
+                      </span>
+                    })()}
+                  </div>
+                )}
                 {firm.notes && <div className="text-[11px] text-warn/80 mt-1">{firm.notes}</div>}
               </div>
               <div className="flex gap-2 shrink-0">
@@ -228,6 +242,10 @@ function FirmEditor({ firm, onSave, onCancel }: { firm: PropFirm | null; onSave:
     default_payout_min: firm?.default_payout_min ?? 500,
     notes: firm?.notes || '',
     verified_at: firm?.verified_at || '2026-01',
+    discount_code: firm?.discount_code || '',
+    discount_pct: firm?.discount_pct ?? 0,
+    discount_expires: firm?.discount_expires ? firm.discount_expires.slice(0, 10) : '',
+    trader_profit_split_pct: firm?.trader_profit_split_pct ?? 0.9,
   })
   return (
     <div className="bg-panel2/40 border border-accent/40 rounded-lg p-5 space-y-3">
@@ -264,6 +282,30 @@ function FirmEditor({ firm, onSave, onCancel }: { firm: PropFirm | null; onSave:
           <input value={f.verified_at} onChange={e => setF({ ...f, verified_at: e.target.value })}
             placeholder="2026-01" className="w-full bg-bg border border-border rounded px-2 py-1.5 text-sm" />
         </Field>
+        <Field label="Trader Profit Split %">
+          <input type="number" step="0.01" value={f.trader_profit_split_pct * 100}
+            onChange={e => setF({ ...f, trader_profit_split_pct: (parseFloat(e.target.value) || 0) / 100 })}
+            className="w-full bg-bg border border-border rounded px-2 py-1.5 text-sm num" />
+        </Field>
+      </div>
+      <div className="border-t border-border pt-3">
+        <div className="text-xs text-muted uppercase tracking-wider mb-2">Discount Code (optional)</div>
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <Field label="Code">
+            <input value={f.discount_code} onChange={e => setF({ ...f, discount_code: e.target.value })}
+              placeholder="JUNE25" className="w-full bg-bg border border-border rounded px-2 py-1.5 text-sm" />
+          </Field>
+          <Field label="Discount %">
+            <input type="number" step="0.01" value={f.discount_pct * 100}
+              onChange={e => setF({ ...f, discount_pct: (parseFloat(e.target.value) || 0) / 100 })}
+              className="w-full bg-bg border border-border rounded px-2 py-1.5 text-sm num" />
+          </Field>
+          <Field label="Expires">
+            <input type="date" value={f.discount_expires}
+              onChange={e => setF({ ...f, discount_expires: e.target.value })}
+              className="w-full bg-bg border border-border rounded px-2 py-1.5 text-sm" />
+          </Field>
+        </div>
       </div>
       <div>
         <label className="text-xs text-muted">Notes</label>
@@ -272,7 +314,11 @@ function FirmEditor({ firm, onSave, onCancel }: { firm: PropFirm | null; onSave:
       </div>
       <div className="flex justify-end gap-2">
         <button onClick={onCancel} className="text-muted text-sm px-3 py-1.5">Cancel</button>
-        <button onClick={() => onSave(f)} className="bg-accent text-bg px-4 py-1.5 rounded text-sm font-medium">Save</button>
+        <button onClick={() => onSave({
+          ...f,
+          discount_expires: f.discount_expires ? new Date(f.discount_expires).toISOString() : null,
+          discount_code: f.discount_code || null,
+        })} className="bg-accent text-bg px-4 py-1.5 rounded text-sm font-medium">Save</button>
       </div>
     </div>
   )

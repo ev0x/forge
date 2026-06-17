@@ -190,14 +190,26 @@ def compute_prop_status(db: Session, account: models.Account) -> PropStatus:
     # Compute amount for next payout based on preference
     if account.payout_preference == "min":
         target_amount = account.payout_min or 0.0
+        payout_label = "Min"
     elif account.payout_preference == "custom" and account.payout_preference_amount > 0:
         target_amount = account.payout_preference_amount
+        payout_label = "Custom"
     else:  # max
         target_amount = payout_max_for_next or 0.0
+        payout_label = "Max"
     # The cap is hard — never request more than the firm allows for this payout #.
+    # Note: we DON'T clamp the displayed amount down to current available-above-safety.
+    # The user wants to see the *target* (Min / Max / Custom) regardless of whether
+    # they're eligible yet — eligibility + distance_to_next_payout already convey
+    # whether the payout can be taken right now.
     payout_amount_for_next = max(account.payout_min or 0.0, min(target_amount, payout_max_for_next or target_amount))
-    if available_above_safety < (account.payout_min or 0.0):
-        payout_amount_for_next = min(payout_amount_for_next, max(0.0, available_above_safety))
+    # Resolve trader's profit split via the firm preset (defaults to 100% when no firm).
+    trader_split = 1.0
+    if account.prop_firm_key:
+        firm_def = db.query(models.PropFirmDef).filter_by(key=account.prop_firm_key).first()
+        if firm_def and firm_def.trader_profit_split_pct is not None:
+            trader_split = float(firm_def.trader_profit_split_pct)
+    payout_to_trader = payout_amount_for_next * trader_split
 
     # Trading days used (distinct days with at least one trade)
     trading_days_used = len({t.exit_time.date() for t in trades})
@@ -295,6 +307,9 @@ def compute_prop_status(db: Session, account: models.Account) -> PropStatus:
         payout_min=account.payout_min or 0.0,
         payout_max_for_next=payout_max_for_next,
         payout_amount_for_next=round(payout_amount_for_next, 2),
+        payout_amount_label=payout_label,
+        trader_profit_split_pct=trader_split,
+        payout_amount_to_trader=round(payout_to_trader, 2),
         distance_to_next_payout=round(distance_to_next_payout, 2),
         eligible_for_payout=eligible and payout_amount_for_next > 0,
         eligibility_reason=reason,
@@ -321,6 +336,12 @@ def compute_prop_status(db: Session, account: models.Account) -> PropStatus:
 
 def _predict_payout_date(trades, account, current_equity, safety_net_balance,
                          payout_amount, trading_days_used, last_payout_date):
+    """Predict (recent_avg_per_trading_day, eta_date, calendar_days_needed).
+
+    Futures don't trade on weekends, so we accumulate P&L on trading days only
+    and convert any trading-day count into a calendar offset that skips Sat/Sun.
+    Spacing is a calendar-day rule but the resulting ETA is nudged onto a weekday.
+    """
     if not trades:
         return 0.0, None, None
     by_day: dict = {}
@@ -332,29 +353,43 @@ def _predict_payout_date(trades, account, current_equity, safety_net_balance,
         return 0.0, None, None
     recent_avg = sum(by_day[d] for d in days) / len(days)
 
-    # Equity needed for next payout
     needed_equity = safety_net_balance + (payout_amount or 0.0)
     needed = needed_equity - current_equity
+    now = datetime.utcnow()
 
-    # Constraint 1: enough P&L to reach payout amount
-    days_for_pnl = max(0, int(needed / recent_avg) + 1) if recent_avg > 0 else None
-    # Constraint 2: meet min trading days requirement
-    days_for_min_trading = max(0, (account.min_trading_days_before_payout or 0) - trading_days_used)
-    # Constraint 3: spacing from last payout
-    if last_payout_date and (account.min_days_between_payouts or 0) > 0:
-        ds = (datetime.utcnow() - last_payout_date).days
-        days_for_spacing = max(0, (account.min_days_between_payouts or 0) - ds)
-    else:
-        days_for_spacing = 0
+    def _add_business_days(start: datetime, n: int) -> datetime:
+        d = start
+        while n > 0:
+            d += timedelta(days=1)
+            if d.weekday() < 5:
+                n -= 1
+        return d
+
+    def _nudge(d: datetime) -> datetime:
+        while d.weekday() >= 5:
+            d += timedelta(days=1)
+        return d
 
     if recent_avg <= 0 and needed > 0:
         return recent_avg, None, None
-    if needed <= 0:
-        days_needed = max(days_for_min_trading, days_for_spacing)
-    else:
-        days_needed = max(days_for_pnl or 0, days_for_min_trading, days_for_spacing)
 
-    return recent_avg, datetime.utcnow() + timedelta(days=days_needed), days_needed
+    # Trading-day pace + min-trading-day requirement (both in trading days)
+    td_for_pnl = max(0, int(needed / recent_avg) + 1) if recent_avg > 0 and needed > 0 else 0
+    td_for_min = max(0, (account.min_trading_days_before_payout or 0) - trading_days_used)
+    td_needed = max(td_for_pnl, td_for_min)
+    eta_from_trading = _add_business_days(now, td_needed) if td_needed > 0 else now
+
+    # Calendar-day spacing rule from the firm
+    if last_payout_date and (account.min_days_between_payouts or 0) > 0:
+        ds = (now - last_payout_date).days
+        cal_for_spacing = max(0, (account.min_days_between_payouts or 0) - ds)
+    else:
+        cal_for_spacing = 0
+    eta_from_spacing = _nudge(now + timedelta(days=cal_for_spacing)) if cal_for_spacing > 0 else now
+
+    eta = max(eta_from_trading, eta_from_spacing)
+    days_needed = (eta - now).days
+    return recent_avg, eta, days_needed
 
 
 def compute_economics(db: Session, accounts: list[models.Account]) -> dict:

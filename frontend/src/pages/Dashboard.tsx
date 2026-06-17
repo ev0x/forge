@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { Account, FullStats, api, fmtUsd, fmtPct, fmtDuration } from '../lib/api'
+import { Account, FullStats, DailyPnl, api, fmtUsd, fmtPct, fmtDuration } from '../lib/api'
 import HeroCard from '../components/HeroCard'
 import WinRateCard from '../components/WinRateCard'
 import ProfitFactorCard from '../components/ProfitFactorCard'
@@ -116,6 +116,9 @@ export default function Dashboard({ accountIds, accounts }: { accountIds?: numbe
         </div>
       </div>
 
+      {/* Period P&L row (today, this week, last week, this month, last month) */}
+      <PeriodPnlRow daily={stats.daily} startingBalance={c.starting_balance} />
+
       {/* Core metric cards (the four the user explicitly asked for) */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
         <WinRateCard title="Trade Win %" rate={c.win_rate}
@@ -189,6 +192,65 @@ export default function Dashboard({ accountIds, accounts }: { accountIds?: numbe
         <BreakdownBars title="By Day of Week" rows={stats.by_dow} />
         <BreakdownBars title="By Hour of Day (entry)" rows={stats.by_hour} />
       </div>
+    </div>
+  )
+}
+
+
+function startOfWeek(d: Date): Date {
+  const out = new Date(d)
+  out.setHours(0, 0, 0, 0)
+  // Monday as week start
+  const day = (out.getDay() + 6) % 7  // 0=Mon ... 6=Sun
+  out.setDate(out.getDate() - day)
+  return out
+}
+
+function PeriodPnlRow({ daily, startingBalance }: { daily: DailyPnl[]; startingBalance: number }) {
+  const now = new Date()
+  const todayStart = new Date(now); todayStart.setHours(0, 0, 0, 0)
+  const tomorrowStart = new Date(todayStart); tomorrowStart.setDate(tomorrowStart.getDate() + 1)
+  const thisWeekStart = startOfWeek(now)
+  const lastWeekStart = new Date(thisWeekStart); lastWeekStart.setDate(lastWeekStart.getDate() - 7)
+  const thisMonthStart = new Date(now.getFullYear(), now.getMonth(), 1)
+  const lastMonthStart = new Date(now.getFullYear(), now.getMonth() - 1, 1)
+  const lastMonthEnd = thisMonthStart  // exclusive
+
+  function sumBetween(startInc: Date, endExcl: Date): number {
+    let acc = 0
+    for (const d of daily) {
+      const t = new Date(d.date).getTime()
+      if (t >= startInc.getTime() && t < endExcl.getTime()) acc += d.net_pnl
+    }
+    return acc
+  }
+  const today = sumBetween(todayStart, tomorrowStart)
+  const thisWeek = sumBetween(thisWeekStart, tomorrowStart)
+  const lastWeek = sumBetween(lastWeekStart, thisWeekStart)
+  const thisMonth = sumBetween(thisMonthStart, tomorrowStart)
+  const lastMonth = sumBetween(lastMonthStart, lastMonthEnd)
+  const items = [
+    { label: 'Today', value: today },
+    { label: 'This Week', value: thisWeek },
+    { label: 'Last Week', value: lastWeek },
+    { label: 'This Month', value: thisMonth },
+    { label: 'Last Month', value: lastMonth },
+  ]
+  return (
+    <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+      {items.map(it => {
+        const tone = it.value > 0 ? 'text-win' : it.value < 0 ? 'text-loss' : 'text-text'
+        const pct = startingBalance > 0 ? it.value / startingBalance : 0
+        return (
+          <div key={it.label} className="bg-panel border border-border rounded-lg p-3">
+            <div className="text-[10px] text-muted uppercase tracking-wider">{it.label}</div>
+            <div className={`num font-bold mt-1 text-lg ${tone}`}>{fmtUsd(it.value, { signed: true })}</div>
+            <div className={`text-[11px] num ${tone}`}>
+              {pct >= 0 ? '+' : ''}{(pct * 100).toFixed(2)}%
+            </div>
+          </div>
+        )
+      })}
     </div>
   )
 }

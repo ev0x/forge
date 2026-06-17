@@ -182,6 +182,10 @@ class PropFirmDefIn(BaseModel):
     default_payout_min: float = 500.0
     notes: Optional[str] = None
     verified_at: Optional[str] = None
+    discount_code: Optional[str] = None
+    discount_pct: float = 0.0
+    discount_expires: Optional[datetime] = None
+    trader_profit_split_pct: float = 0.9
 
 
 class PropFirmDefOut(PropFirmDefIn):
@@ -203,6 +207,10 @@ class PropFirmDefUpdate(BaseModel):
     notes: Optional[str] = None
     verified_at: Optional[str] = None
     archived: Optional[bool] = None
+    discount_code: Optional[str] = None
+    discount_pct: Optional[float] = None
+    discount_expires: Optional[datetime] = None
+    trader_profit_split_pct: Optional[float] = None
 
 
 # ---------- Playbooks ----------
@@ -250,6 +258,8 @@ class UserSettingsOut(BaseModel):
     eval_playbook_id: Optional[int]
     timezone: str
     date_by: str
+    secondary_currency: str = "AUD"
+    secondary_currency_fx_rate: float = 1.5
 
 
 class UserSettingsUpdate(BaseModel):
@@ -262,6 +272,8 @@ class UserSettingsUpdate(BaseModel):
     eval_playbook_id: Optional[int] = None
     timezone: Optional[str] = None
     date_by: Optional[str] = None
+    secondary_currency: Optional[str] = None
+    secondary_currency_fx_rate: Optional[float] = None
 
 
 # ---------- Forecast ----------
@@ -269,8 +281,12 @@ class ForecastedPayout(BaseModel):
     account_id: int
     account_name: str
     predicted_date: datetime
-    amount: float
+    amount: float                # gross payout from firm
     payout_number: int
+    # Trader's share after the firm's profit split (set per-firm). Defaults to
+    # amount when no firm/plan is associated with the account.
+    amount_to_trader: float = 0.0
+    trader_split_pct: float = 1.0
 
 
 class ForecastBucket(BaseModel):
@@ -278,11 +294,13 @@ class ForecastBucket(BaseModel):
     end_date: datetime
     payouts: list[ForecastedPayout]
     total: float
+    total_to_trader: float = 0.0
 
 
 class PayoutForecast(BaseModel):
     buckets: list[ForecastBucket]
     total_next_6_months: float
+    total_next_6_months_to_trader: float = 0.0
     all_predicted: list[ForecastedPayout]
 
 
@@ -653,6 +671,11 @@ class DailyPnl(BaseModel):
     trade_count: int
     win_count: int
     loss_count: int
+    # Side / profit-factor inputs for the calendar's monthly stats.
+    long_pnl: float = 0.0
+    short_pnl: float = 0.0
+    gross_wins: float = 0.0      # sum of positive net_pnl on the day
+    gross_losses: float = 0.0    # absolute value of negative net_pnl on the day
 
 
 class BreakdownRow(BaseModel):
@@ -752,6 +775,9 @@ class PropStatus(BaseModel):
     payout_min: float
     payout_max_for_next: float                 # cap for the next payout #
     payout_amount_for_next: float              # actual planned amount (after pref + clamp)
+    payout_amount_label: str = "Max"           # 'Min' | 'Max' | 'Custom' | 'Clamped' — which rule decided the amount
+    trader_profit_split_pct: float = 1.0       # firm's split (1.0 = trader keeps 100%)
+    payout_amount_to_trader: float = 0.0       # payout_amount_for_next × split
     distance_to_next_payout: float             # equity needed - current
     eligible_for_payout: bool
     eligibility_reason: Optional[str]          # e.g. 'Need 3 more trading days'

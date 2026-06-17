@@ -134,6 +134,7 @@ def parse_ninjatrader_executions(file_path: str) -> Iterator[ParsedFill]:
             else:
                 open_close = None
 
+            commission = _parse_money(row.get("Commission") or "")
             account_num = (row.get("Account") or "").strip()
             connection  = (row.get("Connection") or "").strip()
             # Compose a stable external_id: prefer "Connection-Account", fall back to either alone.
@@ -166,4 +167,5 @@ def parse_ninjatrader_executions(file_path: str) -> Iterator[ParsedFill]:
                 low_during_position=None,
                 note=None,
                 is_automated=False,
+                commission=commission if commission > 0 else None,
             )

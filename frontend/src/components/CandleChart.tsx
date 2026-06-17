@@ -1,25 +1,34 @@
 import { useEffect, useRef, useState } from 'react'
 import { createChart, ColorType, IChartApi, ISeriesApi, CandlestickData, LineStyle, UTCTimestamp, SeriesMarker, Time } from 'lightweight-charts'
 import { Trade, Execution, MarketDataBar, fmtUsd, api, parseBackendTime } from '../lib/api'
+import { useTimezone } from '../lib/timezone'
 
-const TIMEFRAMES = ['1m', '5m', '15m', '1h', '1d']
+const TIMEFRAMES = ['s30', 'm1', 'm2', 'm5', 'm15', 'm30', 'h1', 'h4', 'd1']
+const TF_SECONDS: Record<string, number> = {
+  s30: 30, m1: 60, m2: 120, m5: 300, m15: 900, m30: 1800,
+  h1: 3600, h4: 14400, d1: 86400,
+}
 
 export default function CandleChart({ trade, executions }: { trade: Trade; executions: Execution[] }) {
   const containerRef = useRef<HTMLDivElement>(null)
   const chartRef = useRef<IChartApi | null>(null)
   const candleRef = useRef<ISeriesApi<'Candlestick'> | null>(null)
-  const [timeframe, setTimeframe] = useState('1m')
+  const [timeframe, setTimeframe] = useState('m5')
   const [bars, setBars] = useState<MarketDataBar[] | null>(null)
   const [loadingBars, setLoadingBars] = useState(false)
-  const [yahooBusy, setYahooBusy] = useState(false)
   const [feedback, setFeedback] = useState<string | null>(null)
+  const tz = useTimezone()
 
   // Try to load real bars for this trade's time window (with 30-min padding).
   useEffect(() => {
     if (!trade) return
     let cancelled = false
     setLoadingBars(true); setBars(null)
-    const padMin = timeframe === '1d' ? 60 * 24 * 5 : timeframe === '1h' ? 60 * 12 : 60
+    // Pad the bar fetch window so the chart has context on either side of the
+    // trade. Higher timeframes need more pad (a 4h chart needs days, a 30s
+    // chart only needs minutes).
+    const tfSec = TF_SECONDS[timeframe] ?? 300
+    const padMin = Math.max(30, Math.min(60 * 24 * 7, Math.round((tfSec * 60) / 60)))
     // CRITICAL: parse the backend's naive-UTC timestamps as UTC.  Without this,
     // the browser interprets them as local time and the fetch window misses the
     // trade by hours (Adelaide is 9.5h off).
@@ -40,6 +49,30 @@ export default function CandleChart({ trade, executions }: { trade: Trade; execu
     if (!containerRef.current || executions.length === 0) return
     if (bars === null) return  // wait for fetch to resolve
 
+    // Build TZ-aware formatters once. `lightweight-charts` calls these for the
+    // crosshair tooltip + the x-axis tick labels — without them, both show in
+    // the browser's local zone regardless of our user setting.
+    const fmtTooltip = (time: number) => {
+      const d = new Date(Number(time) * 1000)
+      return d.toLocaleString(undefined, {
+        timeZone: tz,
+        year: 'numeric', month: 'short', day: 'numeric',
+        hour: '2-digit', minute: '2-digit',
+      })
+    }
+    const fmtTick = (time: number) => {
+      const d = new Date(Number(time) * 1000)
+      const showSeconds = TF_SECONDS[timeframe] < 60
+      const showDate = TF_SECONDS[timeframe] >= 86400
+      if (showDate) {
+        return d.toLocaleDateString(undefined, { timeZone: tz, month: 'short', day: 'numeric' })
+      }
+      return d.toLocaleTimeString(undefined, {
+        timeZone: tz, hour: '2-digit', minute: '2-digit',
+        ...(showSeconds ? { second: '2-digit' } : {}),
+      })
+    }
+
     const chart = createChart(containerRef.current, {
       width: containerRef.current.clientWidth,
       height: 460,
@@ -53,7 +86,15 @@ export default function CandleChart({ trade, executions }: { trade: Trade; execu
         horzLines: { color: '#1a2233' },
       },
       rightPriceScale: { borderColor: '#222b3d', scaleMargins: { top: 0.1, bottom: 0.2 } },
-      timeScale: { borderColor: '#222b3d', timeVisible: true, secondsVisible: false },
+      timeScale: {
+        borderColor: '#222b3d',
+        timeVisible: true,
+        secondsVisible: TF_SECONDS[timeframe] < 60,
+        tickMarkFormatter: fmtTick as any,
+      },
+      localization: {
+        timeFormatter: fmtTooltip as any,
+      },
       crosshair: {
         mode: 1,
         vertLine: { color: '#3a4a66', width: 1, style: LineStyle.Dashed, labelBackgroundColor: '#222b3d' },
@@ -64,7 +105,7 @@ export default function CandleChart({ trade, executions }: { trade: Trade; execu
       upColor: '#22c55e', downColor: '#ef4444',
       borderUpColor: '#22c55e', borderDownColor: '#ef4444',
       wickUpColor: '#22c55e', wickDownColor: '#ef4444',
-      priceFormat: { type: 'price', precision: 2, minMove: 0.25 },
+      priceFormat: { type: 'price', precision: 2, minMove: minMoveForRoot(trade.instrument_root) },
     })
     chartRef.current = chart; candleRef.current = series
 
@@ -152,23 +193,7 @@ export default function CandleChart({ trade, executions }: { trade: Trade; execu
       chart.remove()
       chartRef.current = null; candleRef.current = null
     }
-  }, [trade.id, executions.length, bars, timeframe]) // eslint-disable-line
-
-  async function tryYahooFetch() {
-    setYahooBusy(true); setFeedback(null)
-    try {
-      const r = await api.marketData.yahooFetch(trade.symbol, timeframe, 7)
-      setFeedback(`Yahoo: pulled ${r.bars} new bars for ${r.yahoo_symbol}. ${r.notes.join(' ')}`)
-      // Re-fetch local bars
-      const padMin = 60
-      const from = new Date(new Date(trade.entry_time).getTime() - padMin * 60_000).toISOString()
-      const to = new Date(new Date(trade.exit_time).getTime() + padMin * 60_000).toISOString()
-      const rows = await api.marketData.bars(trade.symbol, from, to, timeframe)
-      setBars(rows)
-    } catch (e: any) {
-      setFeedback(`Yahoo fetch failed: ${e.message || e}`)
-    } finally { setYahooBusy(false) }
-  }
+  }, [trade.id, executions.length, bars, timeframe, tz]) // eslint-disable-line
 
   if (executions.length === 0) return null
 
@@ -199,24 +224,32 @@ export default function CandleChart({ trade, executions }: { trade: Trade; execu
               </button>
             ))}
           </div>
-          {!usingReal && (
-            <button onClick={tryYahooFetch} disabled={yahooBusy}
-              className="text-xs bg-panel2 border border-border rounded px-2 py-1 hover:border-accent/40 disabled:opacity-50">
-              {yahooBusy ? 'Fetching…' : 'Try Yahoo →'}
-            </button>
-          )}
         </div>
       </div>
       <div ref={containerRef} className="w-full" />
       {loadingBars && <div className="text-[10px] text-muted mt-2">Loading bars…</div>}
       {!usingReal && !loadingBars && (
         <div className="text-[10px] text-muted mt-2">
-          No cached bars for this symbol/timeframe in this window. Showing synthesized candles.
-          Upload bars on the <a href="/market-data" className="text-accent hover:underline">Market Data</a> page,
-          or try the Yahoo button above (continuous front-month, last ~7 days for 1m).
+          No cached bars for this symbol / timeframe / window. Showing synthesized candles
+          built from fill prices. Upload NinjaTrader tick exports on the{' '}
+          <a href="/market-data" className="text-accent hover:underline">Market Data</a> page.
         </div>
       )}
       {feedback && <div className="text-[10px] text-accent mt-2">{feedback}</div>}
     </div>
   )
+}
+
+function minMoveForRoot(root: string): number {
+  const r = (root || '').toUpperCase()
+  // Common futures tick sizes. Defaults to 0.01 for anything unknown so the
+  // chart doesn't snap candles to a misleading grid.
+  if (['MNQ', 'NQ', 'MES', 'ES', 'M2K', 'RTY'].includes(r)) return 0.25
+  if (['MYM', 'YM'].includes(r)) return 1.0
+  if (['MGC', 'GC'].includes(r)) return 0.1
+  if (['SI', 'SIL'].includes(r)) return 0.005
+  if (['CL', 'MCL'].includes(r)) return 0.01
+  if (r === 'NG') return 0.001
+  if (['FGBL', 'FGBM', 'FGBS', 'FGBX'].includes(r)) return 0.01
+  return 0.01
 }

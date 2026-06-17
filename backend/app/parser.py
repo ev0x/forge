@@ -36,6 +36,9 @@ class ParsedFill:
     low_during_position: Optional[float]
     note: Optional[str]
     is_automated: bool
+    # Per-fill commission USD when the source carries it (Tradovate, NinjaTrader).
+    # None for Sierra (which doesn't report it per fill).
+    commission: Optional[float] = None
 
 
 def _parse_float(s: str) -> Optional[float]:

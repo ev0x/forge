@@ -1,9 +1,11 @@
 import { useEffect, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { api, Trade, fmtUsd, fmtDuration } from '../lib/api'
+import { useDateFmt } from '../lib/timezone'
 
 export default function RecentTrades({ accountIds, limit = 8 }: { accountIds?: number[]; limit?: number }) {
   const [trades, setTrades] = useState<Trade[]>([])
+  const fmt = useDateFmt()
   useEffect(() => {
     api.trades.list({ account_ids: accountIds, limit }).then(setTrades)
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -30,7 +32,7 @@ export default function RecentTrades({ accountIds, limit = 8 }: { accountIds?: n
           <tbody>
             {trades.map(t => (
               <tr key={t.id} className="border-t border-border/70">
-                <td className="py-1.5 text-muted">{new Date(t.entry_time).toLocaleString(undefined, { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</td>
+                <td className="py-1.5 text-muted">{fmt(t.entry_time)}</td>
                 <td className="font-medium">{t.symbol}</td>
                 <td>
                   <span className={`text-[10px] px-1.5 py-0.5 rounded ${t.side === 'Long' ? 'bg-win/15 text-win' : 'bg-loss/15 text-loss'}`}>

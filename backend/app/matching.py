@@ -110,19 +110,46 @@ def _make_trade(o: _PendingTrade, account_id: int,
                 commission_per_side: float, fees_per_side: float,
                 tz_name: str = "UTC", date_by: str = "exit",
                 rate_table: dict | None = None,
+                commission_by_exec_id: dict[int, float] | None = None,
                 ) -> tuple[Trade, list[int]]:
     spec = get_spec(o.symbol)
     pv = spec["point_value"]
+    # Non-USD instruments (e.g. Eurex FGBL) — multiply native PnL by FX. For USD
+    # instruments this is 1.0 and the math is unchanged.
+    fx = float(spec.get("fx_rate_to_usd", 1.0) or 1.0)
     matched_qty = min(o.entry_qty, o.exit_qty)
     side_sign = 1 if o.side == "Long" else -1
-    gross = (o.avg_exit - o.avg_entry) * matched_qty * pv * side_sign
-    # Per-symbol commission lookup. rate_table keyed by instrument_root (e.g. "MNQ").
-    if rate_table and o.instrument_root in rate_table:
-        per_side = float(rate_table[o.instrument_root])
+    gross = (o.avg_exit - o.avg_entry) * matched_qty * pv * side_sign * fx
+
+    # Commission resolution: if every execution contributing to this trade
+    # carries a per-fill commission (Tradovate / NinjaTrader exports), trust
+    # those and sum them. Otherwise fall back to account-level / per-symbol
+    # rates × (entry + exit qty). Per-fill commissions are in the instrument's
+    # native currency, so FX-convert them. Account-level rates are configured
+    # in USD already and stay as-is.
+    per_fill_commissions: list[float] = []
+    have_all_per_fill = bool(commission_by_exec_id) and bool(o.exec_ids)
+    if have_all_per_fill:
+        for eid in o.exec_ids:
+            c = commission_by_exec_id.get(eid) if commission_by_exec_id else None
+            if c is None:
+                have_all_per_fill = False
+                break
+            per_fill_commissions.append(c)
+    if have_all_per_fill:
+        commissions = sum(per_fill_commissions) * fx
     else:
-        per_side = commission_per_side
-    commissions = per_side * (matched_qty * 2)
-    fees = fees_per_side * (matched_qty * 2)
+        if rate_table and o.instrument_root in rate_table:
+            per_side = float(rate_table[o.instrument_root])
+        else:
+            per_side = commission_per_side
+        commissions = per_side * (matched_qty * 2)
+    # Exchange fees: instrument-level (Eurex's cut on every fill, not in
+    # the broker's commission). Native currency, FX-converted. Account-level
+    # `fees_per_side` (already USD) stacks on top.
+    instrument_exchange_fee = float(spec.get("exchange_fee_per_side", 0.0) or 0.0)
+    fees = (fees_per_side * (matched_qty * 2)
+            + instrument_exchange_fee * fx * (matched_qty * 2))
     net = gross - commissions - fees
 
     mfe = mae = mfe_pnl = mae_pnl = None
@@ -133,8 +160,8 @@ def _make_trade(o: _PendingTrade, account_id: int,
         else:
             mfe = o.avg_entry - o.lo
             mae = o.avg_entry - o.hi
-        mfe_pnl = mfe * matched_qty * pv
-        mae_pnl = mae * matched_qty * pv
+        mfe_pnl = mfe * matched_qty * pv * fx
+        mae_pnl = mae * matched_qty * pv * fx
 
     duration = int((o.exit_time - o.entry_time).total_seconds()) if o.entry_time and o.exit_time else 0
     trade = Trade(
@@ -176,6 +203,11 @@ def match_executions_to_trades(
     for e in executions:
         by_symbol.setdefault(e.symbol, []).append(e)
 
+    # Per-execution commission lookup for the source-truth path (Tradovate, NT).
+    commission_by_exec_id: dict[int, float] = {
+        e.id: e.commission for e in executions if e.commission is not None
+    }
+
     results: list[tuple[Trade, list[int]]] = []
 
     for symbol, execs in by_symbol.items():
@@ -186,7 +218,8 @@ def match_executions_to_trades(
         if not has_markers:
             results.extend(_position_walk_fallback(execs, account_id,
                                                    commission_per_side, fees_per_side,
-                                                   tz_name, date_by, rate_table))
+                                                   tz_name, date_by, rate_table,
+                                                   commission_by_exec_id))
             continue
 
         # Pass 1: collect openers, grouped by their internal_order_id
@@ -270,13 +303,16 @@ def match_executions_to_trades(
 
         # Pass 5: build trades
         for p in merged:
-            results.append(_make_trade(p, account_id, commission_per_side, fees_per_side, tz_name, date_by, rate_table))
+            results.append(_make_trade(p, account_id, commission_per_side, fees_per_side,
+                                       tz_name, date_by, rate_table,
+                                       commission_by_exec_id))
 
     return results
 
 
 def _position_walk_fallback(execs, account_id, commission_per_side, fees_per_side,
-                            tz_name="UTC", date_by="exit", rate_table=None):
+                            tz_name="UTC", date_by="exit", rate_table=None,
+                            commission_by_exec_id=None):
     """Legacy position-to-zero matcher. Used when fills have no open_close markers."""
     results = []
     position = 0
@@ -314,6 +350,7 @@ def _position_walk_fallback(execs, account_id, commission_per_side, fees_per_sid
                     if position == 0:
                         results.append(_make_trade(current, account_id,
                                                    commission_per_side, fees_per_side,
-                                                   tz_name, date_by, rate_table))
+                                                   tz_name, date_by, rate_table,
+                                                   commission_by_exec_id))
                         current = None
     return results

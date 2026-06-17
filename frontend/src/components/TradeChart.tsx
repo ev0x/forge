@@ -1,5 +1,6 @@
 import { ResponsiveContainer, ComposedChart, Line, Area, Scatter, XAxis, YAxis, Tooltip, CartesianGrid, ReferenceLine, ReferenceArea } from 'recharts'
 import { Trade, Execution, fmtUsd } from '../lib/api'
+import { useTimezone } from '../lib/timezone'
 
 /* Visualizes a trade:
    - Y axis: price
@@ -8,6 +9,7 @@ import { Trade, Execution, fmtUsd } from '../lib/api'
    - markers at each execution (green for entry, red for exit, sized by qty)
    - dashed line at avg entry */
 export default function TradeChart({ trade, executions }: { trade: Trade; executions: Execution[] }) {
+  const tz = useTimezone()
   if (executions.length === 0) return null
 
   const sorted = [...executions].sort((a, b) => +new Date(a.fill_time) - +new Date(b.fill_time))
@@ -16,12 +18,10 @@ export default function TradeChart({ trade, executions }: { trade: Trade; execut
   let runHi: number | null = null
   let runLo: number | null = null
   const data = sorted.map((e, i) => {
-    // Reconstruct best info: many Sierra fills carry HighDuringPosition/LowDuringPosition on closing rows.
-    // Use the running max/min of available values so the band is monotone.
     return {
       idx: i,
       t: Math.round((+new Date(e.fill_time) - t0) / 1000),
-      label: new Date(e.fill_time).toLocaleTimeString(),
+      label: new Date(e.fill_time).toLocaleTimeString(undefined, { timeZone: tz, hour: '2-digit', minute: '2-digit', second: '2-digit' }),
       price: e.fill_price,
       side: e.side,
       qty: e.quantity,

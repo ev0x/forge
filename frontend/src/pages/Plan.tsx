@@ -131,8 +131,11 @@ export default function Plan() {
 
       {/* Per-account ETAs — split into Evals and Funded/PA. Blown accounts are hidden. */}
       {(() => {
-        const live = summary.etas.filter(e => e.status !== 'blown' && e.status !== 'closed')
-        const evals = live.filter(e => e.account_type === 'eval' || e.account_type === 'personal')
+        const live = summary.etas.filter(e =>
+          e.status !== 'blown' && e.status !== 'closed' && e.account_type !== 'personal'
+        )
+        // Hide passed_eval evals — target's already hit, waiting on PA conversion.
+        const evals = live.filter(e => e.account_type === 'eval' && e.status !== 'passed_eval')
         const fundedPA = live.filter(e => e.account_type === 'pa' || e.account_type === 'funded')
         return (
           <div className="grid grid-cols-1 xl:grid-cols-2 gap-5">

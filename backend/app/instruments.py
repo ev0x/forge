@@ -1,6 +1,18 @@
 """Futures contract specs. Sierra exports prices as integer ticks (price * divisor).
 Add more roots as needed — the parser falls back to a default if unknown.
+
+For non-USD-denominated instruments (e.g. Eurex FGBL), set `currency` and
+`fx_rate_to_usd`. The matching layer multiplies gross PnL and per-fill
+commissions by this rate so trade values land in USD even though the
+underlying contract settles in another currency.
+
+The user can override per-root FX rates without editing this file by setting
+the env var `INSTRUMENT_FX_RATES_USD` to a JSON object, e.g.
+
+    INSTRUMENT_FX_RATES_USD={"FGBL":1.162,"FOAT":1.155}
 """
+import json
+import os
 import re
 
 INSTRUMENT_SPECS = {
@@ -24,12 +36,31 @@ INSTRUMENT_SPECS = {
     "6E": {"price_divisor": 10000.0, "point_value": 125000.0, "tick_size": 0.00005, "name": "Euro FX"},
     "M6E": {"price_divisor": 10000.0, "point_value": 12500.0, "tick_size": 0.0001, "name": "Micro Euro"},
     # Eurex Bund. Native contract is €1000/point with tick 0.01 = €10.
-    # Prop firms commonly apply the same 1000 multiplier directly in USD
-    # (price_diff × qty × 1000), so this works whether the broker quotes EUR or USD.
-    "FGBL": {"price_divisor": 100.0, "point_value": 1000.0, "tick_size": 0.01, "name": "Euro Bund (10y)"},
+    # Brokers settle in USD by FX-converting the EUR PnL — handled via fx_rate_to_usd.
+    # `exchange_fee_per_side` is Eurex's exchange/clearing fee charged on every
+    # fill, in native currency. Tradovate's `commission` column doesn't include
+    # it, so brokers' reported net is lower than what fills imply. ~€0.44/side
+    # matches Tradeify FGBL broker statements as of 2026-06.
+    "FGBL": {"price_divisor": 100.0, "point_value": 1000.0, "tick_size": 0.01,
+             "name": "Euro Bund (10y)", "currency": "EUR", "fx_rate_to_usd": 1.162,
+             "exchange_fee_per_side": 0.44},
 }
 
-DEFAULT_SPEC = {"price_divisor": 1.0, "point_value": 1.0, "tick_size": 0.01, "name": "Unknown"}
+DEFAULT_SPEC = {"price_divisor": 1.0, "point_value": 1.0, "tick_size": 0.01,
+                "name": "Unknown", "currency": "USD", "fx_rate_to_usd": 1.0}
+
+
+# Per-root FX overrides from env, applied once at module import. Lets the user
+# retune EUR/USD (etc.) without a code change — edit .env, restart api.
+_fx_env = os.environ.get("INSTRUMENT_FX_RATES_USD", "").strip()
+if _fx_env:
+    try:
+        _overrides = json.loads(_fx_env)
+        for _root, _rate in _overrides.items():
+            if _root in INSTRUMENT_SPECS:
+                INSTRUMENT_SPECS[_root]["fx_rate_to_usd"] = float(_rate)
+    except (ValueError, TypeError) as e:
+        print(f"[instruments] ignoring malformed INSTRUMENT_FX_RATES_USD: {e}")
 
 _ROOT_RE = re.compile(r"^([A-Z0-9]{1,4}?)([FGHJKMNQUVXZ])(\d{1,2})(\..+)?$")
 
@@ -53,4 +84,8 @@ def get_spec(symbol: str) -> dict:
     root = extract_root(symbol)
     spec = INSTRUMENT_SPECS.get(root, DEFAULT_SPEC).copy()
     spec["root"] = root
+    # Backfill currency / FX / fee defaults so callers can rely on these keys.
+    spec.setdefault("currency", "USD")
+    spec.setdefault("fx_rate_to_usd", 1.0)
+    spec.setdefault("exchange_fee_per_side", 0.0)
     return spec

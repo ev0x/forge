@@ -62,6 +62,20 @@ ALTERS = [
     # AccountCost: recurring monthly subscriptions
     "ALTER TABLE account_costs ADD COLUMN IF NOT EXISTS is_recurring BOOLEAN DEFAULT FALSE",
     "ALTER TABLE account_costs ADD COLUMN IF NOT EXISTS recurring_end_date TIMESTAMP",
+
+    # Per-fill commission (Tradovate / NinjaTrader carry it; Sierra does not).
+    # Nullable: NULL = parser had no commission for this fill -> use account-level rate.
+    "ALTER TABLE executions ADD COLUMN IF NOT EXISTS commission DOUBLE PRECISION",
+
+    # PropFirmDef: discount codes + trader profit-split %
+    "ALTER TABLE prop_firm_defs ADD COLUMN IF NOT EXISTS discount_code VARCHAR",
+    "ALTER TABLE prop_firm_defs ADD COLUMN IF NOT EXISTS discount_pct DOUBLE PRECISION DEFAULT 0",
+    "ALTER TABLE prop_firm_defs ADD COLUMN IF NOT EXISTS discount_expires TIMESTAMP",
+    "ALTER TABLE prop_firm_defs ADD COLUMN IF NOT EXISTS trader_profit_split_pct DOUBLE PRECISION DEFAULT 0.9",
+
+    # UserSettings: optional secondary currency (e.g. AUD) for UI conversion display
+    "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS secondary_currency VARCHAR DEFAULT 'AUD'",
+    "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS secondary_currency_fx_rate DOUBLE PRECISION DEFAULT 1.5",
 ]
 
 

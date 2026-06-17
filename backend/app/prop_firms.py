@@ -14,6 +14,7 @@ PROP_FIRM_SEEDS = {
         "default_drawdown_mode": "trailing_realtime",
         "default_consistency_rule_pct": 0.30,
         "default_min_trading_days_before_payout": 8,
+        "trader_profit_split_pct": 0.9,
         "default_payout_min": 500.0,
         "verified_at": "2026-01",
         "notes": "Intraday trailing DD. DD locks at starting once equity hits start+DD+$100. 30% consistency rule.",
@@ -33,6 +34,7 @@ PROP_FIRM_SEEDS = {
         "default_drawdown_mode": "trailing_eod",
         "default_consistency_rule_pct": 0.30,
         "default_min_trading_days_before_payout": 8,
+        "trader_profit_split_pct": 0.9,
         "default_payout_min": 500.0,
         "verified_at": "2026-01",
         "notes": "End-of-day trailing drawdown — peak only ratchets up on the daily close. Same payout structure as Intraday.",
@@ -53,6 +55,7 @@ PROP_FIRM_SEEDS = {
         "default_consistency_rule_pct": 0.50,
         "default_min_trading_days_before_payout": 5,
         "default_payout_min": 250.0,
+        "trader_profit_split_pct": 0.9,
         "verified_at": "2026-01",
         "notes": "EOD trailing DD. 50% consistency rule. 80/20 split first $10K then 100%. Verify current rules.",
         "plans": [
@@ -70,6 +73,7 @@ PROP_FIRM_SEEDS = {
         "default_consistency_rule_pct": 0.30,
         "default_min_trading_days_before_payout": 7,
         "default_payout_min": 500.0,
+        "trader_profit_split_pct": 0.9,
         "verified_at": "2026-01",
         "notes": "Newer firm — payout schedule and contract limits vary by promotion. Verify before relying.",
         "plans": [
@@ -86,6 +90,7 @@ PROP_FIRM_SEEDS = {
         "default_consistency_rule_pct": 0.0,
         "default_min_trading_days_before_payout": 0,
         "default_payout_min": 0.0,
+        "trader_profit_split_pct": 1.0,
         "verified_at": "2026-05",
         "notes": "Personal Tradovate broker account — not a prop firm. No DD limits, no profit targets, no payout rules. Use for trade tracking & analytics. Commissions reflect Tradovate's standard tier ($0.39/side micros, $1.49/side standards) — adjust if you're on Active Trader / Lifetime tiers.",
         "plans": [
@@ -104,6 +109,7 @@ PROP_FIRM_SEEDS = {
         "default_consistency_rule_pct": 0.35,
         "default_min_trading_days_before_payout": 5,
         "default_payout_min": 250.0,
+        "trader_profit_split_pct": 0.9,
         "verified_at": "2026-06",
         "notes": "Growth program: 2-step eval, EOD trailing DD, no consistency rule in eval but 35% once funded, 5-day Sim Funded payout cycle. Per-size profit targets/DDs/contract limits are best-estimates from public pricing widget — verify against your dashboard and edit if wrong.",
         "plans": [
@@ -120,6 +126,7 @@ PROP_FIRM_SEEDS = {
         "default_consistency_rule_pct": 0.50,
         "default_min_trading_days_before_payout": 5,
         "default_payout_min": 250.0,
+        "trader_profit_split_pct": 1.0,
         "verified_at": "2026-01",
         "notes": "EOD trailing DD. 50% consistency rule. Verify current rules.",
         "plans": [
@@ -132,7 +139,8 @@ PROP_FIRM_SEEDS = {
 
 
 def seed_prop_firms(db):
-    """Idempotently seed firm/plan rows from PROP_FIRM_SEEDS. Doesn't overwrite user edits."""
+    """Idempotently seed firm/plan rows from PROP_FIRM_SEEDS. Doesn't overwrite user edits.
+    For seeded (non-custom) firms we backfill missing fields when the seed adds new ones."""
     from . import models
     for firm_key, firm in PROP_FIRM_SEEDS.items():
         existing = db.query(models.PropFirmDef).filter_by(key=firm_key).first()
@@ -143,13 +151,18 @@ def seed_prop_firms(db):
                 default_consistency_rule_pct=firm["default_consistency_rule_pct"],
                 default_min_trading_days_before_payout=firm["default_min_trading_days_before_payout"],
                 default_payout_min=firm["default_payout_min"],
+                trader_profit_split_pct=firm.get("trader_profit_split_pct", 0.9),
                 notes=firm["notes"], verified_at=firm["verified_at"], is_custom=False,
             )
             db.add(f); db.flush()
             for p in firm["plans"]:
                 db.add(models.PropFirmPlanDef(firm_id=f.id, **p))
         else:
-            # For each plan in seed, add if missing (lets us push new plans on update)
+            # Backfill new fields onto firms that were seeded before this column existed.
+            # Only fills NULLs / defaults — never overwrites a value the user has edited.
+            seed_split = firm.get("trader_profit_split_pct", 0.9)
+            if existing.trader_profit_split_pct in (None, 0.0, 0.9):
+                existing.trader_profit_split_pct = seed_split
             for p in firm["plans"]:
                 if not db.query(models.PropFirmPlanDef).filter_by(firm_id=existing.id, key=p["key"]).first():
                     db.add(models.PropFirmPlanDef(firm_id=existing.id, **p))

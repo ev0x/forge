@@ -101,18 +101,32 @@ def compute_stats(trades: list[Trade], starting_balance: float = 0.0,
         dd_curve.append(DrawdownPoint(t=t.exit_time, drawdown=-round(dd, 2), trade_id=t.id))
 
     # Daily
-    daily_map: dict[str, dict] = defaultdict(lambda: {"net": 0.0, "n": 0, "w": 0, "l": 0, "vol": 0})
+    daily_map: dict[str, dict] = defaultdict(lambda: {
+        "net": 0.0, "n": 0, "w": 0, "l": 0, "vol": 0,
+        "long_pnl": 0.0, "short_pnl": 0.0,
+        "gross_wins": 0.0, "gross_losses": 0.0,
+    })
     for t in trades:
         key = t.trade_date.strftime("%Y-%m-%d")
         daily_map[key]["net"] += t.net_pnl
         daily_map[key]["n"] += 1
         daily_map[key]["vol"] += t.quantity
+        if t.side == "Long":
+            daily_map[key]["long_pnl"] += t.net_pnl
+        elif t.side == "Short":
+            daily_map[key]["short_pnl"] += t.net_pnl
         if t.net_pnl > 0:
             daily_map[key]["w"] += 1
+            daily_map[key]["gross_wins"] += t.net_pnl
         elif t.net_pnl < 0:
             daily_map[key]["l"] += 1
+            daily_map[key]["gross_losses"] += abs(t.net_pnl)
     daily = [
-        DailyPnl(date=d, net_pnl=round(v["net"], 2), trade_count=v["n"], win_count=v["w"], loss_count=v["l"])
+        DailyPnl(date=d, net_pnl=round(v["net"], 2),
+                 trade_count=v["n"], win_count=v["w"], loss_count=v["l"],
+                 long_pnl=round(v["long_pnl"], 2), short_pnl=round(v["short_pnl"], 2),
+                 gross_wins=round(v["gross_wins"], 2),
+                 gross_losses=round(v["gross_losses"], 2))
         for d, v in sorted(daily_map.items())
     ]
 
@@ -129,10 +143,13 @@ def compute_stats(trades: list[Trade], starting_balance: float = 0.0,
     avg_daily_volume = (sum(v["vol"] for v in daily_map.values()) / trading_days) if trading_days else 0.0
     avg_trades_per_day = (n / trading_days) if trading_days else 0.0
 
-    # If broker balances cover all selected accounts, use them as authoritative equity.
+    # When at least one selected account has a broker_balance entered, the
+    # router computes a per-account mixed equity (broker where set, trade-net
+    # otherwise) and passes it in via broker_total. Show that as the
+    # authoritative dashboard equity.
     uses_broker = (broker_total is not None
-                   and broker_accounts_total > 0
-                   and broker_accounts_covered == broker_accounts_total)
+                   and broker_accounts_covered > 0
+                   and broker_accounts_total > 0)
     if uses_broker:
         current_equity = float(broker_total)
         broker_pnl_val = current_equity - starting_balance
