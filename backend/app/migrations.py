@@ -76,6 +76,38 @@ ALTERS = [
     # UserSettings: optional secondary currency (e.g. AUD) for UI conversion display
     "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS secondary_currency VARCHAR DEFAULT 'AUD'",
     "ALTER TABLE user_settings ADD COLUMN IF NOT EXISTS secondary_currency_fx_rate DOUBLE PRECISION DEFAULT 1.5",
+
+    # Footprint volume profile: per-bar bid/ask volume at each price level.
+    # One row per (symbol, timeframe, bar_ts, price). bid_vol = aggressive
+    # sells (trades at the bid), ask_vol = aggressive buys (trades at the ask).
+    """
+    CREATE TABLE IF NOT EXISTS footprint_levels (
+        id BIGSERIAL PRIMARY KEY,
+        symbol VARCHAR NOT NULL,
+        timeframe VARCHAR NOT NULL,
+        bar_ts TIMESTAMP NOT NULL,
+        price DOUBLE PRECISION NOT NULL,
+        bid_volume DOUBLE PRECISION NOT NULL DEFAULT 0,
+        ask_volume DOUBLE PRECISION NOT NULL DEFAULT 0,
+        CONSTRAINT uq_footprint_lvl UNIQUE (symbol, timeframe, bar_ts, price)
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_footprint_lookup ON footprint_levels (symbol, timeframe, bar_ts)",
+
+    # Raw classified ticks — enables true tick-by-tick footprint replay.
+    # side: 'A' = aggressive sell (hit bid), 'B' = aggressive buy (lifted offer).
+    # Stored as ms-epoch to match the playhead's millisecond clock.
+    """
+    CREATE TABLE IF NOT EXISTS market_ticks (
+        id BIGSERIAL PRIMARY KEY,
+        symbol VARCHAR NOT NULL,
+        ts_ms BIGINT NOT NULL,
+        price DOUBLE PRECISION NOT NULL,
+        side CHAR(1) NOT NULL,
+        size DOUBLE PRECISION NOT NULL
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS ix_market_ticks_lookup ON market_ticks (symbol, ts_ms)",
 ]
 
 

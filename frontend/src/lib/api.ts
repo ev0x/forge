@@ -448,6 +448,22 @@ export const api = {
     timeframes: () => req<Array<{label: string; seconds: number}>>('/api/market-data/timeframes'),
     bars: (symbol: string, fromDt: string, toDt: string, timeframe = 'm5') =>
       req<MarketDataBar[]>(`/api/market-data/bars?${qs({ symbol, from: fromDt, to: toDt, timeframe })}`),
+    footprint: (symbol: string, fromDt: string, toDt: string, timeframe = 'm5') =>
+      req<{ bars: Array<{ ts: string; levels: Array<{ price: number; bid: number; ask: number }> }> }>(
+        `/api/market-data/footprint?${qs({ symbol, from: fromDt, to: toDt, timeframe })}`),
+    footprintTicks: (symbol: string, fromDt: string, toDt: string, barSeconds: number, tradeId?: number) =>
+      req<{
+        cached: boolean; symbol: string; tick_count: number; cost: number
+        bar_seconds: number; tick_size: number
+        bars: Array<{ ts: number }>
+        prices: number[]
+        ticks: Array<{ t: number; price: number; side: 'A' | 'B'; size: number }>
+        markers: {
+          direction: 'LONG' | 'SHORT' | null
+          entry: { ts: number; price: number } | null
+          exit: { ts: number; price: number } | null
+        }
+      }>(`/api/market-data/footprint-ticks?${qs({ symbol, from: fromDt, to: toDt, bar_seconds: barSeconds, trade_id: tradeId })}`),
     uploadNTTick: async (file: File, symbolOverride?: string) => {
       const fd = new FormData()
       fd.append('file', file)

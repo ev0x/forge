@@ -1,6 +1,6 @@
 from datetime import datetime
 from sqlalchemy import (
-    Column, Integer, String, Float, DateTime, ForeignKey, Index,
+    Column, Integer, BigInteger, String, Float, DateTime, ForeignKey, Index,
     UniqueConstraint, Text, Boolean,
 )
 from sqlalchemy.orm import relationship
@@ -214,6 +214,47 @@ class MarketDataBar(Base):
     __table_args__ = (
         UniqueConstraint("symbol", "timeframe", "ts", name="uq_bar"),
         Index("ix_bars_symbol_tf_ts", "symbol", "timeframe", "ts"),
+    )
+
+
+class MarketTick(Base):
+    """Classified raw tick — one per executed print from the source feed.
+    Used to drive true tick-by-tick footprint replay (the FootprintGrid
+    aggregates these on-the-fly as the playhead advances).
+    side='A' means aggressive sell (price hit the bid); 'B' = aggressive buy."""
+    __tablename__ = "market_ticks"
+    id = Column(BigInteger, primary_key=True)
+    symbol = Column(String, nullable=False)
+    ts_ms = Column(BigInteger, nullable=False)
+    price = Column(Float, nullable=False)
+    side = Column(String, nullable=False)   # 'A' or 'B'
+    size = Column(Float, nullable=False)
+
+    __table_args__ = (
+        Index("ix_market_ticks_lookup", "symbol", "ts_ms"),
+    )
+
+
+class FootprintLevel(Base):
+    """Per-bar volume profile split by aggressor side. One row per
+    (symbol, timeframe, bar_ts, price). Populated during NT tick upload.
+
+    bid_volume = trades where last <= bid (aggressive sells / hit bid).
+    ask_volume = trades where last >= ask (aggressive buys / lifted offer).
+    Ticks between bid and ask use the "last-tick rule" to classify.
+    """
+    __tablename__ = "footprint_levels"
+    id = Column(Integer, primary_key=True)
+    symbol = Column(String, nullable=False)
+    timeframe = Column(String, nullable=False)
+    bar_ts = Column(DateTime, nullable=False)
+    price = Column(Float, nullable=False)
+    bid_volume = Column(Float, default=0, nullable=False)
+    ask_volume = Column(Float, default=0, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint("symbol", "timeframe", "bar_ts", "price", name="uq_footprint_lvl"),
+        Index("ix_footprint_lookup", "symbol", "timeframe", "bar_ts"),
     )
 
 

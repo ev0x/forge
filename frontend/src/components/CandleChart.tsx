@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { createChart, ColorType, IChartApi, ISeriesApi, CandlestickData, LineStyle, UTCTimestamp, SeriesMarker, Time } from 'lightweight-charts'
 import { Trade, Execution, MarketDataBar, fmtUsd, api, parseBackendTime } from '../lib/api'
 import { useTimezone } from '../lib/timezone'
+import FootprintGrid from './FootprintGrid'
 
 const TIMEFRAMES = ['s30', 'm1', 'm2', 'm5', 'm15', 'm30', 'h1', 'h4', 'd1']
 const TF_SECONDS: Record<string, number> = {
@@ -17,6 +18,7 @@ export default function CandleChart({ trade, executions }: { trade: Trade; execu
   const [bars, setBars] = useState<MarketDataBar[] | null>(null)
   const [loadingBars, setLoadingBars] = useState(false)
   const [feedback, setFeedback] = useState<string | null>(null)
+  const [showFootprint, setShowFootprint] = useState(false)
   const tz = useTimezone()
 
   // Try to load real bars for this trade's time window (with 30-min padding).
@@ -197,6 +199,26 @@ export default function CandleChart({ trade, executions }: { trade: Trade; execu
 
   if (executions.length === 0) return null
 
+  // Footprint mode replaces the candlestick chart with a price/time grid.
+  // The grid has its own timeframe + display-mode toolbar so we don't render
+  // the candle chart at all when footprint is on.
+  if (showFootprint) {
+    return (
+      <div>
+        <div className="flex items-center justify-between mb-2">
+          <button onClick={() => setShowFootprint(false)}
+            className="text-xs px-2.5 py-1 rounded border border-accent/60 bg-accent/15 text-accent">
+            ← Back to candles
+          </button>
+          <div className="text-[10px] text-muted">
+            {trade.symbol} · {trade.side} × {trade.quantity} · Net {fmtUsd(trade.net_pnl, { signed: true })}
+          </div>
+        </div>
+        <FootprintGrid trade={trade} executions={executions} />
+      </div>
+    )
+  }
+
   return (
     <div className="bg-panel border border-border rounded-lg p-4">
       <div className="flex items-center justify-between mb-3 gap-2 flex-wrap">
@@ -216,6 +238,11 @@ export default function CandleChart({ trade, executions }: { trade: Trade; execu
           </div>
         </div>
         <div className="flex items-center gap-2">
+          <button onClick={() => setShowFootprint(true)}
+            title="Switch to footprint grid view (price × time × bid/ask volume)"
+            className="text-xs px-2.5 py-1 rounded border bg-panel2 border-border text-muted hover:text-text">
+            Footprint →
+          </button>
           <div className="flex bg-panel2 border border-border rounded text-xs overflow-hidden">
             {TIMEFRAMES.map(tf => (
               <button key={tf} onClick={() => setTimeframe(tf)}
