@@ -42,26 +42,31 @@ async def upload_nt_tick(
     All supported timeframes are aggregated on the same pass.
     """
     filename = file.filename or "unknown.txt"
-    # Stream to a temp file so we can re-read it (the parser is iterator-based).
-    tmp = tempfile.NamedTemporaryFile(prefix="nt_tick_", suffix=".txt", delete=False)
-    tmp_path = tmp.name
+    # Stream the upload into a per-request directory using the original
+    # basename — the parser keys symbol extraction off the basename, and
+    # using a fresh dir avoids collisions with stale files from previous
+    # uploads (the earlier hardlink trick caused this exact bug: second
+    # upload reused an old hardlink and silently parsed the old content).
+    safe_name = os.path.basename(filename).replace("/", "_").replace("\\", "_")
+    tmp_dir = tempfile.mkdtemp(prefix="nt_tick_")
+    tmp_path = os.path.join(tmp_dir, safe_name)
     bytes_received = 0
     try:
-        while True:
-            chunk = await file.read(1024 * 1024)
-            if not chunk:
-                break
-            tmp.write(chunk)
-            bytes_received += len(chunk)
-        tmp.close()
+        with open(tmp_path, "wb") as f:
+            while True:
+                chunk = await file.read(1024 * 1024)
+                if not chunk:
+                    break
+                f.write(chunk)
+                bytes_received += len(chunk)
         if bytes_received == 0:
             raise HTTPException(400, "Empty file")
         if symbol_override:
             root = extract_root(symbol_override) or symbol_override
             contract = symbol_override.split(".")[0]
-            _, _, bars_by_tf, footprint_by_tf, ticks = parse_nt_tick_to_bars(_with_name(tmp_path, filename))
+            _, _, bars_by_tf, footprint_by_tf, ticks = parse_nt_tick_to_bars(tmp_path)
         else:
-            root, contract, bars_by_tf, footprint_by_tf, ticks = parse_nt_tick_to_bars(_with_name(tmp_path, filename))
+            root, contract, bars_by_tf, footprint_by_tf, ticks = parse_nt_tick_to_bars(tmp_path)
 
         total_inserted = 0
         total_skipped = 0
@@ -151,21 +156,10 @@ async def upload_nt_tick(
             os.unlink(tmp_path)
         except OSError:
             pass
-
-
-def _with_name(path: str, original_name: str) -> str:
-    """Symlink/alias trick: the parser keys symbol extraction off the basename,
-    not the temp path. Copy the basename onto the temp file path by creating
-    a hardlink in the same dir with the real filename. Falls back to bare path
-    if linking fails (parser will then fall back to filename-only stem)."""
-    safe_name = os.path.basename(original_name).replace("/", "_").replace("\\", "_")
-    link_path = os.path.join(os.path.dirname(path), safe_name)
-    try:
-        if not os.path.exists(link_path):
-            os.link(path, link_path)
-        return link_path
-    except OSError:
-        return path
+        try:
+            os.rmdir(tmp_dir)
+        except OSError:
+            pass
 
 
 @router.get("/summary", response_model=list[schemas.MarketDataSummaryRow])

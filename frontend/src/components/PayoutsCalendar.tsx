@@ -159,9 +159,21 @@ function MonthGrid({ year, month, items }: { year: number; month: number; items:
                 if (day === null) return <div key={di} className="min-h-[60px]" />
                 const date = `${year}-${String(month+1).padStart(2,'0')}-${String(day).padStart(2,'0')}`
                 const dayItems = itemsByDate[date] || []
+                const today = new Date()
+                const isToday = today.getFullYear() === year
+                  && today.getMonth() === month
+                  && today.getDate() === day
                 return (
-                  <div key={di} className="bg-panel2/50 border border-border rounded-sm p-1 min-h-[60px] flex flex-col">
-                    <div className="text-[10px] text-muted text-right">{day}</div>
+                  <div key={di}
+                    className={`rounded-sm p-1 min-h-[60px] flex flex-col ${
+                      isToday
+                        ? 'bg-accent/15 border-2 border-accent'
+                        : 'bg-panel2/50 border border-border'
+                    }`}>
+                    <div className={`text-[10px] text-right ${isToday ? 'text-accent font-bold' : 'text-muted'}`}>
+                      {isToday && <span className="mr-1">●</span>}
+                      {day}
+                    </div>
                     <div className="flex flex-wrap gap-0.5 mt-0.5">
                       {dayItems.map((it, ii) => (
                         <span key={ii}

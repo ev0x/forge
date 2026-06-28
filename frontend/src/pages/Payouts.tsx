@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { api, Account, Payout, PropStatus, UserSettings, fmtUsd } from '../lib/api'
+import { useEffect, useMemo, useState } from 'react'
+import { api, Account, Payout, PropStatus, UserSettings, PayoutForecast, fmtUsd } from '../lib/api'
 import PayoutForecastWidget from '../components/PayoutForecast'
 import PayoutsCalendar from '../components/PayoutsCalendar'
 
@@ -10,11 +10,42 @@ export default function Payouts({ accounts }: { accounts: Account[] }) {
   const [statuses, setStatuses] = useState<Record<number, PropStatus>>({})
   const [creating, setCreating] = useState(false)
   const [settings, setSettings] = useState<UserSettings | null>(null)
+  const [forecast, setForecast] = useState<PayoutForecast | null>(null)
+  const [horizonDate, setHorizonDate] = useState<string>(() => {
+    const d = new Date(); d.setMonth(d.getMonth() + 1)
+    return d.toISOString().slice(0, 10)
+  })
+  const [taxPct, setTaxPct] = useState<number>(() => {
+    const v = parseFloat(localStorage.getItem('payouts.taxPct') || '')
+    return Number.isFinite(v) && v >= 0 && v <= 100 ? v : 30
+  })
+  useEffect(() => { localStorage.setItem('payouts.taxPct', String(taxPct)) }, [taxPct])
   const [currencyMode, setCurrencyMode] = useState<CurrencyMode>(() =>
     (localStorage.getItem('payouts.currencyMode') as CurrencyMode) || 'USD'
   )
   useEffect(() => { localStorage.setItem('payouts.currencyMode', currencyMode) }, [currencyMode])
   useEffect(() => { api.settings.get().then(setSettings) }, [])
+  useEffect(() => { api.plan.forecast().then(setForecast) }, [])
+
+  // Summarise the next-payout window: the soonest predicted payout, plus the
+  // accumulated total/yours up to the user-picked horizon date.
+  const summary = useMemo(() => {
+    if (!forecast || forecast.all_predicted.length === 0) return null
+    const sorted = [...forecast.all_predicted]
+      .sort((a, b) => new Date(a.predicted_date).getTime() - new Date(b.predicted_date).getTime())
+    const next = sorted[0]
+    const now = Date.now()
+    const nextDate = new Date(next.predicted_date).getTime()
+    const daysToNext = Math.max(0, Math.ceil((nextDate - now) / (24 * 60 * 60 * 1000)))
+    const horizonMs = new Date(horizonDate + 'T23:59:59').getTime()
+    const inRange = sorted.filter(p => new Date(p.predicted_date).getTime() <= horizonMs)
+    return {
+      next, daysToNext,
+      horizonTotal: inRange.reduce((a, p) => a + p.amount, 0),
+      horizonYours: inRange.reduce((a, p) => a + (p.amount_to_trader ?? p.amount), 0),
+      horizonCount: inRange.length,
+    }
+  }, [forecast, horizonDate])
   const secondary = settings?.secondary_currency || 'AUD'
   const fx = settings?.secondary_currency_fx_rate || 1.5
   function fmtSec(usd: number): string {
@@ -110,6 +141,109 @@ export default function Payouts({ accounts }: { accounts: Account[] }) {
         </div>
       )}
 
+      {/* Next payout + horizon picker */}
+      {summary ? (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+          <div className="bg-gradient-to-br from-panel to-panel2/30 border border-accent/30 rounded-xl p-4">
+            <div className="text-[10px] text-muted uppercase tracking-wider">Next payout</div>
+            <div className="text-2xl font-bold text-accent num mt-1">
+              {summary.daysToNext === 0 ? 'today' : `in ${summary.daysToNext}d`}
+            </div>
+            <div className="text-xs text-muted num mt-0.5">
+              {new Date(summary.next.predicted_date).toLocaleDateString(undefined, {
+                weekday: 'short', month: 'short', day: 'numeric',
+              })} · {summary.next.account_name}
+            </div>
+            <div className="text-sm font-semibold mt-2 num text-text">
+              {fmtUsdPair(summary.next.amount)}
+              {summary.next.trader_split_pct < 1 && (
+                <span className="ml-1 text-[11px] text-win">
+                  yours {fmtUsdPair(summary.next.amount_to_trader)}
+                </span>
+              )}
+            </div>
+          </div>
+          <div className="bg-panel border border-border rounded-xl p-4 md:col-span-2">
+            <div className="flex items-center justify-between flex-wrap gap-3 mb-2">
+              <div>
+                <div className="text-[10px] text-muted uppercase tracking-wider">
+                  Potential payouts from now until…
+                </div>
+                <input type="date" value={horizonDate}
+                  min={new Date().toISOString().slice(0, 10)}
+                  onChange={e => setHorizonDate(e.target.value)}
+                  className="mt-1 bg-panel2 border border-border rounded px-2 py-1 text-sm" />
+              </div>
+              <div className="text-right">
+                <div className="text-[10px] text-muted uppercase">Gross total</div>
+                <div className="text-2xl font-bold text-win num">{fmtUsdPair(summary.horizonTotal)}</div>
+                {summary.horizonYours < summary.horizonTotal - 1 && (
+                  <div className="text-[11px] text-win/80 num">
+                    yours: {fmtUsdPair(summary.horizonYours)}
+                  </div>
+                )}
+                <div className="text-[10px] text-muted mt-1">{summary.horizonCount} payout{summary.horizonCount !== 1 ? 's' : ''} expected</div>
+              </div>
+            </div>
+            {/* Tax split — applied to your-after-firm-split amount */}
+            <div className="flex items-center gap-3 my-3 px-3 py-2 bg-panel2/40 border border-border rounded text-xs flex-wrap">
+              <label className="text-muted">Tax set-aside</label>
+              <div className="flex items-center gap-1">
+                <input type="number" min={0} max={100} step={0.5} value={taxPct}
+                  onChange={e => setTaxPct(Math.max(0, Math.min(100, parseFloat(e.target.value) || 0)))}
+                  className="w-16 bg-bg border border-border rounded px-2 py-0.5 text-sm num text-right" />
+                <span className="text-muted">%</span>
+              </div>
+              <div className="flex gap-1">
+                {[0, 15, 25, 30, 35, 47].map(p => (
+                  <button key={p} onClick={() => setTaxPct(p)}
+                    className={`px-1.5 py-0.5 rounded text-[10px] ${
+                      taxPct === p ? 'bg-accent text-bg' : 'bg-panel border border-border text-muted hover:text-text'
+                    }`}>
+                    {p}%
+                  </button>
+                ))}
+              </div>
+              {(() => {
+                const taxBase = summary.horizonYours    // tax applies to the trader's share after the firm's split
+                const tax = taxBase * (taxPct / 100)
+                const afterTax = taxBase - tax
+                return (
+                  <div className="ml-auto flex gap-4 text-right">
+                    <div>
+                      <div className="text-[10px] text-muted uppercase">Set aside</div>
+                      <div className="num text-warn font-semibold">{fmtUsdPair(tax)}</div>
+                    </div>
+                    <div>
+                      <div className="text-[10px] text-muted uppercase">Take home</div>
+                      <div className="num text-win font-semibold">{fmtUsdPair(afterTax)}</div>
+                    </div>
+                  </div>
+                )
+              })()}
+            </div>
+            <div className="flex gap-1.5 text-[11px] flex-wrap">
+              {([
+                ['1w', 7], ['2w', 14], ['1m', 30], ['2m', 60], ['3m', 90], ['6m', 180],
+              ] as Array<[string, number]>).map(([label, days]) => {
+                const d = new Date(); d.setDate(d.getDate() + days)
+                const iso = d.toISOString().slice(0, 10)
+                const active = iso === horizonDate
+                return (
+                  <button key={label} onClick={() => setHorizonDate(iso)}
+                    className={`px-2 py-0.5 rounded border ${
+                      active ? 'border-accent bg-accent/15 text-accent'
+                             : 'border-border bg-panel2 text-muted hover:text-text'
+                    }`}>
+                    {label}
+                  </button>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      ) : null}
+
       <PayoutForecastWidget />
 
       <PayoutsCalendar accounts={accounts} />
@@ -143,6 +277,28 @@ export default function Payouts({ accounts }: { accounts: Account[] }) {
                 {s.max_payouts > 0 && ` of ${s.max_payouts}`}
               </div>
               <div className="mt-3 grid grid-cols-2 gap-3 text-xs">
+                {(() => {
+                  const acct = acctMap[s.account_id]
+                  const usesBroker = acct?.broker_balance != null
+                  const delta = s.current_equity - s.starting_balance
+                  return (
+                    <div>
+                      <div className="text-[10px] text-muted uppercase flex items-center gap-1">
+                        Current Balance
+                        {usesBroker && <span className="text-[8px] uppercase tracking-wider bg-accent/15 text-accent px-1 rounded">broker</span>}
+                      </div>
+                      <div className={`font-semibold num ${delta > 0 ? 'text-win' : delta < 0 ? 'text-loss' : 'text-text'}`}>
+                        {fmtUsdPair(s.current_equity)}
+                      </div>
+                      <div className="text-[9px] text-muted num">
+                        start {fmtUsd(s.starting_balance)} ·{' '}
+                        <span className={delta > 0 ? 'text-win' : delta < 0 ? 'text-loss' : 'text-muted'}>
+                          {fmtUsd(delta, { signed: true })}
+                        </span>
+                      </div>
+                    </div>
+                  )
+                })()}
                 <div>
                   <div className="text-[10px] text-muted uppercase">Est. Date</div>
                   <div className="font-semibold">{s.predicted_next_payout_date ? new Date(s.predicted_next_payout_date).toLocaleDateString() : '—'}</div>

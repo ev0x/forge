@@ -20,6 +20,7 @@ import PropFirms from './pages/PropFirms'
 import Costs from './pages/Costs'
 import Plan from './pages/Plan'
 import MarketData from './pages/MarketData'
+import Stats from './pages/Stats'
 
 export default function App() {
   const [accounts, setAccounts] = useState<Account[]>([])
@@ -148,6 +149,7 @@ export default function App() {
           <SideLink to="/" label="Dashboard" icon="◎" />
           <SideLink to="/daily" label="Daily" icon="☼" />
           <SideLink to="/trades" label="Trades" icon="≡" />
+          <SideLink to="/stats" label="Stats" icon="μ" />
           <SideLink to="/calendar" label="Calendar" icon="▦" />
           <SideLink to="/strategies" label="Strategies" icon="✦" />
           <SideLink to="/plan" label="Plan" icon="◉" />
@@ -192,6 +194,7 @@ export default function App() {
             <Route path="/" element={<Dashboard accountIds={effectiveIds} accounts={accounts} />} />
             <Route path="/daily" element={<Daily accountIds={effectiveIds} />} />
             <Route path="/trades" element={<Trades accountIds={effectiveIds} accounts={accounts} />} />
+            <Route path="/stats" element={<Stats accountIds={effectiveIds} accounts={accounts} />} />
             <Route path="/calendar" element={<Calendar accountIds={effectiveIds} />} />
             <Route path="/strategies" element={<Strategies />} />
             <Route path="/plan" element={<Plan />} />
